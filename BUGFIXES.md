@@ -225,6 +225,27 @@ const path = firstRefPath.map((p) => p.name).join('/');
 
 ---
 
+## 12. `EditInfoZ` ohne nested `sordZ` → leere `objKeys` bei Ordnern
+
+**Symptom:** `elo_get_metadata` auf einer Projektordner-objId (z. B. 509901) lieferte einen vollständigen Sord (Name, Maskenname, Owner), aber `indexFields: {}`. Damit blieb auch `elo_find_project_folder` ohne Projektnummer-Lookup.
+
+**Ursache:** `EditInfoZ` ist ein **verschachtelter** Selector: das äußere `bset` steuert nur, welche EditInfo-Felder zurückkommen (sord, document, keywords, …). Welche **Member innerhalb der einzelnen Objekte** (z. B. `sord.objKeys`) populär werden, steuert das **genested** `sordZ`. Ohne dieses gibt IX einen Sord mit Basisfeldern zurück, aber ohne Index-Daten — sieht aus wie ein leerer Sord.
+
+**Fix:** [`src/elo/constants.ts`](src/elo/constants.ts) — `EDIT_INFO_Z_ALL` ergänzt:
+
+```ts
+export const EDIT_INFO_Z_ALL = {
+  bset: '-1',
+  sordZ: { bset: '-1' },
+} as const;
+```
+
+Bonus-Erkenntnis aus dem gleichen Probe: an Loupz heißt das Projektnummer-Indexfeld **`PRJ_NO`** (nicht `PROJEKTNUMMER`), das Namensfeld `PRJ_NAME`, und Projektordner sind durch `SOL_TYPE = "PROJEKT"` markiert. [`src/tools/elo_find_project_folder.ts`](src/tools/elo_find_project_folder.ts) entsprechend angepasst.
+
+**Lesson learned:** Bei ELO IX `Z`-Selektoren immer die nested Selektoren mit­spezifizieren. Das Schema-Pattern in der OpenAPI verschleiert das, weil jedes `…Z` als `{ bset: string }` dargestellt wird — die nested Members tauchen erst auf, wenn man die Java-Class anschaut.
+
+---
+
 ## Zusammenfassung der Loupz-spezifischen Eigenheiten
 
 | Aspekt | Verhalten bei Loupz |
@@ -243,5 +264,3 @@ const path = firstRefPath.map((p) => p.name).join('/');
 ## Offene Punkte
 
 - **Passwort-Rotation:** Während des Debuggings wurden Credentials in Klartext in der Probe-Script-Output gepostet. Das ELO-Passwort sollte rotiert werden.
-- `elo_find_project_folder` referenziert noch den Index-Feld-Platzhalter `PROJEKTNUMMER` — empirisch bestätigen, dass dieses Feld bei Loupz so heißt.
-- Folder-Metadaten via `elo_get_metadata` derzeit nicht garantiert — bei reinen Folder-IDs ggf. Fallback auf `checkoutSord` mit verschachteltem `editInfoZ.sordZ` ergänzen, falls Bedarf entsteht.

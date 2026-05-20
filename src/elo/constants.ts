@@ -16,6 +16,13 @@ export const LOCK_Z_NO = { bset: '0' } as const;
 // like "mb_all" are NOT accepted — Jackson fails to parse them, which causes
 // a clean HTTP 400 with an empty response body.
 // "-1" sets all bits → return every member. Slightly wasteful but resilient.
+//
+// EditInfoZ additionally requires a NESTED sordZ to actually populate the
+// sord.objKeys array. Without it, the sord comes back without index fields,
+// even with mb_all set on the EditInfo bitmask.
 export const SORD_Z_ALL = { bset: '-1' } as const;
-export const EDIT_INFO_Z_ALL = { bset: '-1' } as const;
+export const EDIT_INFO_Z_ALL = {
+  bset: '-1',
+  sordZ: { bset: '-1' },
+} as const;
 export const DOC_VERSION_Z_ALL = { bset: '-1' } as const;

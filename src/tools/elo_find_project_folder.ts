@@ -3,9 +3,10 @@ import { EloClient } from '../elo/client.js';
 import { isFolder, SORD_Z_ALL } from '../elo/constants.js';
 import type { FindResponse } from '../elo/types.js';
 
-// NOTE: confirm with Marcel which ELO index field actually holds the project number
-// at Loupz. Until verified, we read this constant name from `objKeys`.
-const PROJECT_NUMBER_INDEX_FIELD = 'PROJEKTNUMMER';
+// Verified at Loupz: project folders use `PRJ_NO` as the index field for the
+// project number and `PRJ_NAME` for the human-readable name. Folders that
+// represent a project carry `SOL_TYPE = "PROJEKT"`.
+const PROJECT_NUMBER_INDEX_FIELD = 'PRJ_NO';
 
 export const FindProjectFolderInputSchema = {
   projectNumber: z.string().optional().describe('Project number (e.g. "2025-001")'),

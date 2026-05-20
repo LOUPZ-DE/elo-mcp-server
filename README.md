@@ -100,13 +100,6 @@ Restart Claude Desktop. The four `elo_*` tools must appear in the tool list.
   `sord.type < 254` = folder, `>= 254` = document. Do **not** check
   `sord.type === 5` — that's only one folder subtype.
 
-## Open items before production
-
-- Confirm the ELO index-field name that holds the project number at Loupz —
-  currently `PROJEKTNUMMER` (placeholder in
-  [`src/tools/elo_find_project_folder.ts`](src/tools/elo_find_project_folder.ts)).
-- Confirm the `ELO_WEBCLIENT_URL` pattern empirically.
-
 ## Remote hosting (Easypanel)
 
 The server speaks two transports, switchable via env:
