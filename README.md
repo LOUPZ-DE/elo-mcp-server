@@ -100,6 +100,13 @@ Restart Claude Desktop. The four `elo_*` tools must appear in the tool list.
   `sord.type < 254` = folder, `>= 254` = document. Do **not** check
   `sord.type === 5` — that's only one folder subtype.
 
+## Client integrations
+
+Separate Anleitungen für die wichtigsten Anbindungs-Pfade:
+
+- [Open WebUI / OpenAPI (via mcpo)](docs/open-webui.md)
+- [Notion (Custom Connector, Agents, n8n-Brücke, claude.ai)](docs/notion.md)
+
 ## Remote hosting (Easypanel)
 
 The server speaks two transports, switchable via env:
