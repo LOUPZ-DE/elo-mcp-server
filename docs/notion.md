@@ -1,101 +1,97 @@
-# Notion-Anbindung
+# Notion integration
 
-Anleitung, um ELO-Daten in Notion verfügbar zu machen. Notion bietet mehrere
-Pfade — die richtige Wahl hängt vom Notion-Plan und vom Anwendungsfall ab.
+How to expose ELO data inside Notion. There are several paths; the right one
+depends on the Notion plan tier and the use case.
 
-## Welche Option passt?
+## Which option fits?
 
-| Weg | Was in Notion sichtbar wird | Notion-Plan | Auth | Aufwand |
+| Path | What shows up in Notion | Notion plan | Auth | Effort |
 |---|---|---|---|---|
-| **A. Custom Connector (MCP)** | Notion AI / Q&A fragt ELO direkt wie eine eingebaute Connection (Slack, Drive, …) | Business / Enterprise | OAuth oder Bearer | klein |
-| **B. Notion Agents → Custom Tool** | Agent ruft die MCP-Tools im Workflow auf | Business / Enterprise | wie A | klein-mittel |
-| **C. n8n / Make als ETL-Brücke** | Automation ruft `elo_search` periodisch und schreibt Treffer in Notion-DB | jeder Plan | Bearer | mittel |
-| **D. claude.ai Custom Connector** | claude.ai-Chats können ELO abfragen, Ergebnisse manuell in Notion einfügen | claude.ai-Konto | Bearer (oder OAuth) | klein, aber kein direkter Notion-Lookup |
+| **A. Custom Connector (MCP)** | Notion AI / Q&A queries ELO directly, like a built-in connection (Slack, Drive, …) | Business / Enterprise | OAuth or Bearer | small |
+| **B. Notion Agents → Custom Tool** | An agent calls the MCP tools in a workflow | Business / Enterprise | same as A | small-medium |
+| **C. n8n / Make as ETL bridge** | Automation periodically calls `elo_search` and writes hits into a Notion database | any plan | Bearer | medium |
+| **D. claude.ai Custom Connector** | claude.ai chats can query ELO, results pasted into Notion manually | claude.ai account | Bearer (or OAuth) | small, but no in-Notion lookup |
 
-**A** ist der natürliche Pfad, wenn Notion-AI ELO live abfragen können soll. **C**
-ist der robusteste Fallback, wenn Notion-MCP nicht verfügbar ist oder nicht
-gewünscht.
+**A** is the natural path if Notion AI should query ELO live. **C** is the
+most robust fallback if Notion-native MCP support is not available.
 
-## Weg A: Notion Custom Connector (MCP)
+## Path A: Notion Custom Connector (MCP)
 
-### Voraussetzungen
+### Prerequisites
 
-- **Notion-Workspace auf Business- oder Enterprise-Plan**. Custom Connectors
-  sind kein Free/Plus-Feature. Prüfen unter `Settings → Plans`.
-- **Workspace-Admin-Rechte**. Reguläre Mitglieder sehen das Menü nicht.
-- **ELO-MCP-Server läuft öffentlich** mit gültigem TLS und `MCP_SHARED_SECRET`.
-  Siehe [README → Remote hosting (Easypanel)](../README.md).
-- **Rollout aktiv** im Workspace. Notion verteilt MCP-Features wellenartig —
-  wenn die Help-Center-Doku zu „MCP" / „Custom Connectors" existiert, das
-  UI-Menü aber fehlt, ist der Rollout noch nicht da.
+- **Notion workspace on a Business or Enterprise plan.** Custom Connectors
+  are not part of Free or Plus. Check under `Settings → Plans`.
+- **Workspace admin rights.** Regular members do not see the menu.
+- **The MCP server runs publicly** with valid TLS and a `MCP_SHARED_SECRET`.
+  See [README → Remote hosting (Easypanel)](../README.md).
+- **Feature roll-out is active** in the workspace. Notion ships MCP features
+  in waves — if the Help Center documents "MCP" / "Custom Connectors" but the
+  UI menu is missing, the roll-out has not reached you yet.
 
-### Schritte
+### Steps
 
-1. **In Notion:** `Settings & Members → Connections` → „Develop or manage
-   custom connectors" → **„Add custom connector"** (Menü-Bezeichnungen
-   wechseln zwischen Notion-Versionen, suche nach „MCP", „Custom App",
-   „Connector").
-2. **Type:** „MCP" / „Custom MCP server".
-3. **URL:** `https://elo-mcp.<deine-domain>/mcp`
+1. **In Notion:** `Settings & Members → Connections → Develop or manage
+   custom connectors → "Add custom connector"`. The menu labels drift between
+   Notion versions; search for "MCP", "Custom App", or "Connector".
+2. **Type:** "MCP" / "Custom MCP server".
+3. **URL:** `https://<your-elo-mcp-domain>/mcp`
 4. **Authentication:**
-   - **Bearer Token** (wenn angeboten): `MCP_SHARED_SECRET` eintragen.
-   - **OAuth** (wenn zwingend): siehe Abschnitt „OAuth-Pflicht" unten.
-5. **Scopes / Permissions:** auf den Workspace anwenden, in dem ELO verfügbar
-   sein soll.
+   - **Bearer Token** (when offered): enter the `MCP_SHARED_SECRET`.
+   - **OAuth** (when mandatory): see "OAuth requirement" below.
+5. **Scopes / Permissions:** apply to the workspace where ELO should be
+   available.
 6. **Save / Connect.**
 
 ### Test in Notion
 
-In einer Notion-Seite oder einem AI-Panel fragen:
+In any Notion page or AI panel, ask:
 
-> Suche in ELO nach „Vertrag".
+> Search ELO for "Contract".
 
-Notion AI sollte das Tool `elo_search` aufrufen und die Treffer als Antwort
-listen. Wenn nicht: in Notion's Activity-Log nachsehen, ob der Connector
-überhaupt aufgerufen wird, und parallel im ELO-MCP-Easypanel-Service nach
-Request-Logs schauen.
+Notion AI should call `elo_search` and list the hits. If it does not: check
+Notion's activity log for whether the connector is invoked at all, and the
+MCP server logs in Easypanel to see whether a request arrived.
 
-### OAuth-Pflicht
+### OAuth requirement
 
-Falls Notion **kein** Bearer-Token akzeptiert, sondern OAuth 2.0 Authorization
-Code Flow verlangt, gibt es zwei Wege:
+If Notion does **not** accept a Bearer token and insists on the OAuth 2.0
+Authorization Code Flow, two workarounds:
 
-1. **mcpo dazwischen schalten** ([siehe Open-WebUI-Anleitung](./open-webui.md)).
-   mcpo kann je nach Version OAuth-Proxying — Notion redet OAuth mit mcpo,
-   mcpo redet Bearer mit ELO-MCP. Aktuelle mcpo-Docs prüfen, ob die Version
-   das schon kann.
-2. **OAuth direkt im ELO-MCP-Server einbauen.** Express-Routen für
-   `/authorize` und `/token`, plus statischer Client (`client_id` /
-   `client_secret`), plus In-Memory-Authorization-Code-Store. ~150 Zeilen,
-   aber zusätzliche Sicherheitsfläche. Sollten wir nur bauen, wenn Weg 1
-   wirklich ausscheidet.
+1. **Put mcpo in between** (see [Open WebUI guide](./open-webui.md)). Some
+   mcpo versions can proxy OAuth — Notion speaks OAuth with mcpo, mcpo
+   speaks Bearer to the MCP server. Check the current mcpo docs.
+2. **Add an OAuth endpoint to the MCP server.** Express routes for
+   `/authorize` and `/token`, a static client (`client_id` /
+   `client_secret`), and an in-memory authorization-code store — roughly
+   150 lines, plus extra attack surface. Only worth doing if path 1 is
+   blocked.
 
-## Weg B: Notion Agents
+## Path B: Notion Agents
 
-Notion Agents (in einigen Workspaces auch „Workflows") sind autonome
-AI-Sequenzen, die externe Tools aufrufen können. Wenn Weg A funktioniert,
-ist B nur einen Knopfdruck weiter: Der Agent-Editor erlaubt es, eine
-existierende Custom-Connection als Tool zu referenzieren.
+Notion Agents (sometimes called "Workflows") are autonomous AI sequences
+that can call external tools. Once path A is set up, B is one click further:
+the agent editor lets you reference an existing custom connection as a tool.
 
-Wenn Agents in deinem Workspace verfügbar sind, im Agent-Editor:
+If Agents are available in the workspace, in the agent editor:
 
-1. Schritt hinzufügen → „Tool aufrufen".
-2. Connector „ELO" wählen, Tool z. B. `elo_search`.
-3. Input-Mapping aus dem Agent-Kontext (Page-Property, vorheriger Schritt).
-4. Output speichern oder weiterverarbeiten.
+1. Add step → "Call tool".
+2. Pick the "ELO" connector, then a specific tool (e.g. `elo_search`).
+3. Map inputs from the agent context (page property, previous step output).
+4. Store the output or feed it to the next step.
 
-## Weg C: n8n / Make als ETL-Brücke
+## Path C: n8n / Make as ETL bridge
 
-Wenn Weg A/B nicht verfügbar sind, ist das der robusteste Fallback. Ergebnis
-ist allerdings **kein Live-Lookup** — n8n syncht ELO-Daten periodisch in eine
-Notion-Datenbank.
+If A/B are not available, this is the most robust fallback. The result is
+**not a live lookup** — n8n syncs ELO data periodically into a Notion
+database.
 
-### Grundsetup (n8n)
+### Basic setup (n8n)
 
-1. **HTTP Request Node** in n8n:
+1. **HTTP Request node** in n8n:
    - Method: `POST`
-   - URL: `https://elo-mcp.<deine-domain>/mcp`
-   - Authentication: Header Auth, Name `Authorization`, Value `Bearer <MCP_SHARED_SECRET>`
+   - URL: `https://<your-elo-mcp-domain>/mcp`
+   - Authentication: Header Auth, name `Authorization`, value
+     `Bearer <MCP_SHARED_SECRET>`
    - Body: MCP JSON-RPC envelope
      ```json
      {
@@ -104,62 +100,62 @@ Notion-Datenbank.
        "method": "tools/call",
        "params": {
          "name": "elo_search",
-         "arguments": { "query": "Vertrag", "maxResults": 50 }
+         "arguments": { "query": "Contract", "maxResults": 50 }
        }
      }
      ```
-2. **Function Node** parst `result.content[0].text` (JSON-String mit der
-   Tool-Ausgabe).
-3. **Notion Node** (mit Notion Integration Token):
-   - Operation: „Create Database Page"
-   - Database ID: ID der Ziel-Datenbank
-   - Properties: Name, objId, Mask, Last-Changed, Link (alle aus dem MCP-Output).
+2. **Function node** parses `result.content[0].text` (a JSON string with the
+   tool output).
+3. **Notion node** (with a Notion Integration Token):
+   - Operation: "Create Database Page"
+   - Database ID: the target database
+   - Properties: name, objId, mask, last-changed, link (all from the MCP
+     output).
 
-### Vor- und Nachteile
+### Trade-offs
 
-- ✅ Funktioniert mit jedem Notion-Plan (auch Free), weil hier die normale
-  Notion-API + Integration Token genutzt wird.
-- ✅ Voller Audit-Trail durch n8n-Logs.
-- ❌ Daten sind eine **Kopie**, nicht live. Bei Änderungen in ELO erst nach
-  dem nächsten n8n-Run sichtbar.
-- ❌ Schema-Änderungen (neue Maske, umbenannte Indexfelder) müssen im
-  n8n-Mapping nachgezogen werden.
+- ✅ Works with any Notion plan (including Free), because it uses the
+  standard Notion API with an Integration Token.
+- ✅ Full audit trail via n8n logs.
+- ❌ Data is a **copy**, not live. Changes in ELO appear only after the
+  next n8n run.
+- ❌ Schema changes (new mask, renamed index fields) must be reflected in
+  the n8n mapping.
 
-## Weg D: claude.ai Custom Connector
+## Path D: claude.ai Custom Connector
 
-Wenn der primäre Use-Case ist „ich will im Chat ELO durchsuchen und Notizen
-machen", lohnt sich der Umweg über Notion gar nicht. Direkt in claude.ai
-einbinden:
+If the primary use case is "I want to search ELO inside a chat and write
+notes about the results", routing through Notion is overkill. Wire it up
+directly in claude.ai:
 
 1. claude.ai → Profile → **Connectors** → **Add Custom Connector**.
-2. URL: `https://elo-mcp.<deine-domain>/mcp`
+2. URL: `https://<your-elo-mcp-domain>/mcp`
 3. Auth: Bearer, `MCP_SHARED_SECRET`.
-4. Save. Tools tauchen in jedem Chat automatisch auf.
+4. Save. Tools appear automatically in every chat.
 
-Vorteil: claude.ai unterstützt MCP-Custom-Connectors offiziell und stabil.
-Nachteil: keine Integration ins Notion-Tooling — du musst manuell
-copy/pasten.
+Pro: claude.ai supports MCP Custom Connectors officially and reliably.
+Con: no integration with Notion tooling — copy/paste manually.
 
-## Token-Hygiene
+## Token hygiene
 
-Sicherheitsgleich wichtig wie bei den anderen Connection-Pfaden:
+Just as important as for the other integration paths:
 
-- **`MCP_SHARED_SECRET`** ist der einzige Schutz vor unautorisierten ELO-Lookups.
-  Mit dem Token kann jeder mit Netzzugang die volle ELO-Suche aufrufen. Bei
-  Verdacht auf Leak rotieren (Easypanel-Env ändern, Notion/claude.ai-Connector
-  neu konfigurieren).
-- **Notion Integration Token** (Weg C) hat Notion-Schreibrechte — ebenfalls
-  ≥32 random Bytes, in n8n's Credential-Manager speichern, nicht in
-  Workflow-Definitionen einchecken.
-- ELO-MCP selbst ist **read-only** — auch wenn ein Token leakt, kann
-  niemand Daten in ELO ändern. Schadensbegrenzung schon eingebaut.
+- **`MCP_SHARED_SECRET`** is the only thing protecting against unauthorised
+  ELO lookups. Anyone with network access who has the token can run the full
+  ELO search. Rotate it (change the Easypanel env, reconfigure
+  Notion/claude.ai) if you suspect a leak.
+- **Notion Integration Token** (path C) holds write rights in Notion —
+  ≥32 random bytes, store it in n8n's credential manager, do not check it
+  into workflow definitions.
+- The MCP server is **read-only** in ELO — even a leaked token cannot mutate
+  ELO data. Damage containment is baked in.
 
 ## Troubleshooting
 
-| Symptom | Wahrscheinliche Ursache |
+| Symptom | Likely cause |
 |---|---|
-| „Add custom connector"-Menü fehlt | Workspace-Plan unter Business/Enterprise, oder kein Admin, oder Rollout noch nicht aktiv. |
-| Notion zeigt „Authentication failed" beim Connector-Anlegen | Bearer-Token falsch eingegeben, oder Notion fordert OAuth. ELO-MCP-Log auf Easypanel zeigt 401-Treffer von Notion. |
-| Connector verbunden, aber Tools tauchen im Chat nicht auf | Discovery noch nicht durchgelaufen. In Notion eine triviale ELO-Frage stellen („was kannst du in ELO?"), das zwingt die Tool-Liste zu laden. |
-| Tool wird aufgerufen, liefert aber leeres Result | ELO-MCP-Tool funktioniert, aber für die konkrete Anfrage keine Treffer in ELO. In MCP-Inspector (lokal) gegen denselben Query testen. |
-| n8n: HTTP-Request endet mit 401 | Bearer-Token im Header-Auth-Setup vergessen oder mit Tippfehler. |
+| "Add custom connector" menu is missing | Workspace below Business/Enterprise, or not an admin, or roll-out not yet active. |
+| Notion shows "Authentication failed" when creating the connector | Bearer token wrong, or Notion requires OAuth. The MCP server log on Easypanel shows the 401 attempt. |
+| Connector connected but tools never appear in chat | Discovery has not run. Ask a trivial ELO question in the chat ("what can you do in ELO?") to force the tool list to load. |
+| Tool is called but returns empty results | The tool works, the query just has no hits in ELO. Test the same query in the local MCP Inspector. |
+| n8n: HTTP request returns 401 | Bearer token missing or mistyped in the header-auth setup. |

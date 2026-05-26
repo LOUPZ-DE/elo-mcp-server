@@ -40,6 +40,10 @@ const eloClient = new EloClient({
 });
 
 const linkOptions = { webclientBaseUrl: cfg.ELO_WEBCLIENT_URL };
+const projectFolderOptions = {
+  webclientBaseUrl: cfg.ELO_WEBCLIENT_URL,
+  projectNumberField: cfg.ELO_PROJECT_NUMBER_FIELD,
+};
 
 const server = new McpServer({
   name: 'elo-mcp-server',
@@ -122,7 +126,7 @@ server.registerTool(
   },
   async (args) => {
     try {
-      return asTextResult(await eloFindProjectFolder(eloClient, args, linkOptions));
+      return asTextResult(await eloFindProjectFolder(eloClient, args, projectFolderOptions));
     } catch (err) {
       return asError(err);
     }

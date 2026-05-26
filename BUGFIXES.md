@@ -1,20 +1,31 @@
-# ELO MCP Server – Bugfix-Dokumentation
+# ELO MCP Server — Bugfix Notebook
 
-**Projekt:** elo-mcp-server
-**Zeitraum:** 2026-05-18
-**Status:** alle vier Tools (`elo_search`, `elo_get_metadata`, `elo_get_document_link`, `elo_find_project_folder`) gegen Loupz-Production verifiziert.
+**Project:** elo-mcp-server
+**Period:** May 2026
+**Status:** all four tools (`elo_search`, `elo_get_metadata`,
+`elo_get_document_link`, `elo_find_project_folder`) verified against a
+production ELO IX instance.
 
-Dokumentiert sind die Bugs in der Reihenfolge, in der sie auftraten, jeweils mit Symptom, Ursache, Fix und ggf. Hinweis für die Zukunft.
+This document is an annotated record of every non-obvious bug we hit while
+implementing a client against the ELO IX REST API. Each entry has the symptom,
+the actual cause (which often differed from the obvious one), the fix, and —
+where relevant — a lesson worth remembering on the next IX project.
 
 ---
 
-## 1. `test:login` meldete „Login OK", obwohl der Login fehlschlug
+## 1. `test:login` reported "Login OK" even though the login failed
 
-**Symptom:** `npm run test:login` gab `Login OK` aus. `elo_search` lieferte trotzdem HTTP 401.
+**Symptom:** `npm run test:login` printed `Login OK`. `elo_search` still
+returned HTTP 401.
 
-**Ursache:** ELO IX antwortet bei falschen Credentials mit HTTP **200** + Body `{ "exception": "[ELOIX:3008]Unbekannter Benutzer, falsches Passwort oder Konto gesperrt." }` und setzt **trotzdem** ein `JSESSIONID`-Cookie (anonyme Session). Der Client prüfte nur das Cookie, nicht das `exception`-Feld.
+**Cause:** ELO IX answers bad credentials with HTTP **200** and an
+`{ "exception": "[ELOIX:3008]Unknown user, wrong password, or account
+locked." }` body — while still setting a `JSESSIONID` cookie (an anonymous
+session). The client only checked for the cookie, never for the `exception`
+field.
 
-**Fix:** In `EloClient.login()` das `exception`-Feld auswerten und bei Vorhandensein eine sprechende Fehlermeldung werfen.
+**Fix:** Inspect the `exception` field in `EloClient.login()` and throw a
+descriptive error when present.
 
 ```ts
 const exception = (response.data as { exception?: unknown })?.exception;
@@ -23,51 +34,71 @@ if (exception) {
 }
 ```
 
-**Lesson learned:** ELO IX gibt fast alle Fehler als HTTP 200 mit `exception`-Body zurück, nicht als 4xx. Statuscode allein reicht nicht.
+**Lesson learned:** ELO IX returns nearly every business-logic error as
+HTTP 200 with an `exception` body, not as 4xx. The status code alone is not
+enough to determine success.
 
 ---
 
-## 2. Passwort wurde durch `.env`-Parsing verstümmelt
+## 2. Password mangled by `.env` parsing
 
-**Symptom:** Login mit korrekten Credentials schlug mit `[ELOIX:3008]` fehl. Web-Client- und Java-Client-Login funktionierten mit denselben Credentials.
+**Symptom:** Login with seemingly correct credentials failed with
+`[ELOIX:3008]`. The same credentials worked fine in the ELO web client and
+Java client.
 
-**Ursache:** Das Passwort enthielt ein Sonderzeichen, das `dotenv` ohne Quoting falsch parst (`#` startet Kommentar, `$` löst Variablensubstitution aus).
+**Cause:** The password contained a special character that `dotenv` mis-parses
+without quoting (`#` starts a comment, `$` triggers variable substitution in
+some configurations).
 
-**Fix:** Im `.env` Credentials in **einfache** Anführungszeichen setzen:
+**Fix:** Wrap credentials in **single quotes** in `.env`:
 
 ```env
-ELO_USERNAME='dein.user'
-ELO_PASSWORD='dein!komplizier$tes#Passwort'
+ELO_USERNAME='your.user'
+ELO_PASSWORD='your!complicated$#password'
 ```
 
-**Lesson learned:** Bei jedem `.env`-Bug mit Credentials zuerst `console.log(p.length, p.charCodeAt(0))` machen, um Längen-Mismatch oder gestrippte Zeichen zu erkennen.
+**Lesson learned:** For every credential bug coming from `.env`, sanity-check
+with `console.log(p.length, p.charCodeAt(0))` first — a length mismatch
+exposes parsing problems immediately.
 
 ---
 
-## 3. Empty-Body 401 bei jedem Nicht-Login-Call (nginx Basic Auth)
+## 3. Empty-body 401 on every non-login call (nginx Basic Auth)
 
-**Symptom:** Nach erfolgreichem Login (`haveTicket: true`) lieferte `findFirstSords` HTTP 401 mit einer HTML-Seite `<title>401 Unauthorized</title>`.
+**Symptom:** After a successful login (`haveTicket: true`), `findFirstSords`
+returned HTTP 401 with an HTML page titled `401 Unauthorized`.
 
-**Ursache:** Vor ELO IX sitzt ein **nginx** als Reverse Proxy. Dieser ist so konfiguriert, dass `/IXServicePortIF/login` öffentlich erreichbar ist (damit User sich überhaupt einloggen können), aber für **alle anderen Pfade HTTP Basic Auth** erforderlich ist. Der `server: nginx/1.24.0 (Ubuntu)`-Header und das HTML-401-Template waren der Hinweis.
+**Cause:** An **nginx** reverse proxy sits in front of ELO IX. It is
+configured so that `/IXServicePortIF/login` is publicly reachable (so users
+can authenticate), but **every other path requires HTTP Basic Auth**. The
+`server: nginx/1.24.0 (Ubuntu)` header on the 401 response and the standard
+nginx 401 HTML template were the giveaways.
 
-**Fix:** `Authorization: Basic <base64>` auf **jeden** Request setzen (auch Login — nginx ignoriert es dort, IX auch). Bei Loupz sind die nginx-Credentials identisch zu den ELO-Credentials, werden aber optional über `ELO_BASIC_AUTH_USER` / `ELO_BASIC_AUTH_PASS` overridebar gehalten, falls IT die später trennt.
+**Fix:** Add `Authorization: Basic <base64>` to **every** request (including
+login — nginx ignores it there, and so does IX). The default behaviour reuses
+the ELO credentials for Basic Auth; if your environment splits the two
+layers, override with `ELO_BASIC_AUTH_USER` / `ELO_BASIC_AUTH_PASS`.
 
 ```ts
 this.basicAuthHeader =
   'Basic ' + Buffer.from(`${baUser}:${baPass}`).toString('base64');
 ```
 
-**Lesson learned:** Bei einem HTML-401 mit `server: nginx`-Header und kleinem Content-Length ist die Auth-Schicht *vor* der Anwendung der Übeltäter, nicht die Anwendung selbst.
+**Lesson learned:** An HTML 401 with a `server: nginx` header and a small
+content length is almost always the proxy talking, not the application. Look
+one layer up.
 
 ---
 
-## 4. `ci` (ClientInfo) fehlte in Nicht-Login-Request-Bodies
+## 4. `ci` (ClientInfo) missing from non-login request bodies
 
-**Symptom:** Nach Fix der Basic Auth lieferten Calls einen leeren HTTP **400**.
+**Symptom:** After fixing Basic Auth, calls came back with empty HTTP **400**.
 
-**Ursache:** ELO IX REST erwartet auf **jedem** Call ein `ci`-Objekt im Body (`{ ticket, language, country, timeZone }`). Wir sendeten es nur beim Login.
+**Cause:** ELO IX REST expects a `ci` object in the body of **every** call
+(`{ ticket, language, country, timeZone }`). We only sent it on login.
 
-**Fix:** In `EloClient.request()` automatisches Injecten eines minimalen `ci` aus den gespeicherten Werten:
+**Fix:** Inject a minimal `ci` from the stored login state into every request
+body in `EloClient.request()`:
 
 ```ts
 private injectCi(body: unknown): unknown {
@@ -81,17 +112,23 @@ private injectCi(body: unknown): unknown {
 }
 ```
 
-**Wichtig:** Das vollständige `clientInfo` aus der Login-Response **nicht zurückspiegeln** — IX gibt dort Server-seitige Metadaten (`appVersion`, `databaseInfo` …) mit, deren Echo manche Setups mit leerem 400 quittieren. Nur die vier Felder Ticket/Sprache/Land/Zeitzone senden.
+**Important:** Do **not** echo the full `clientInfo` from the login response
+back to subsequent requests. IX includes server-side metadata there
+(`appVersion`, `databaseInfo`, …) and some setups reject those fields with
+an empty 400. Send only the four needed: ticket, language, country, timezone.
 
 ---
 
-## 5. Bitset-Selektoren als nackte Strings statt `{ bset: "..." }`
+## 5. Bitset selectors sent as bare strings instead of `{ bset: "..." }`
 
-**Symptom:** Nach Fix von Basic Auth + `ci` weiterhin HTTP 400 mit leerem Body.
+**Symptom:** After fixing Basic Auth and `ci`, the calls still returned HTTP
+400 with an empty body.
 
-**Ursache:** Felder wie `sordZ`, `editInfoZ`, `docVersionZ` sind keine Strings, sondern Objekte mit Schema `{ bset: string }`. Wir sendeten `sordZ: "name,xDateIso,objKeys,…"` als Komma-Liste.
+**Cause:** Fields like `sordZ`, `editInfoZ`, `docVersionZ` are not strings;
+they are objects with schema `{ bset: string }`. We were sending
+`sordZ: "name,xDateIso,objKeys,…"` as a comma-separated list.
 
-**Fix:** Wrapping als Objekt und zentral in `src/elo/constants.ts`:
+**Fix:** Wrap as objects and centralise in `src/elo/constants.ts`:
 
 ```ts
 export const SORD_Z_ALL = { bset: '-1' } as const;
@@ -101,27 +138,40 @@ export const DOC_VERSION_Z_ALL = { bset: '-1' } as const;
 
 ---
 
-## 6. `bset: "mb_all"` löste leeres HTTP 400 aus (Jackson-Deserialisierungsfehler)
+## 6. `bset: "mb_all"` triggered an empty HTTP 400 (Jackson deserialisation)
 
-**Symptom:** Trotz Objekt-Wrapping blieb der 400er bei `sordZ: { bset: "mb_all" }`. Erst ohne `sordZ` antwortete IX mit einer echten JSON-Exception (`[ELOIX:2000]Falscher Parameter: sordZ==null`).
+**Symptom:** Even with the object wrapper, the 400 remained for
+`sordZ: { bset: "mb_all" }`. Only when `sordZ` was omitted entirely did IX
+respond with a real JSON exception
+(`[ELOIX:2000]Falscher Parameter: sordZ==null`).
 
-**Ursache:** Im Swagger-Schema ist `bset` als `type: string` deklariert, in der Java-`SordC`-Klasse aber ein `int`-Bitfeld. Jackson scheitert beim Deserialisieren von `"mb_all"` in ein `int`, bevor die Methode überhaupt aufgerufen wird → Tomcat antwortet mit einem leeren HTTP 400 (ohne IX-Exception-Body, weil IX selbst gar nicht erreicht wird).
+**Cause:** The OpenAPI schema declares `bset` as `type: string`. The Java
+`SordC` class, however, treats it as an `int` bitmask. Jackson fails to
+deserialise `"mb_all"` into an `int` **before** the IX method is invoked, so
+Tomcat returns an empty HTTP 400 (no `exception` body — IX itself is never
+reached).
 
-**Fix:** Numerische Bitmaske als String:
+**Fix:** Use a stringified numeric bitmask:
 
 ```ts
-export const SORD_Z_ALL = { bset: '-1' } as const;  // alle Bits → alle Member
+export const SORD_Z_ALL = { bset: '-1' } as const;  // all bits → all members
 ```
 
-**Lesson learned:** Ein **leerer 400 ohne Body** in einer JSON-RPC-API deutet fast immer auf einen Deserialisierungsfehler hin, nicht auf eine Geschäftslogik-Validierung. Felder, die im Swagger als `string` stehen, aber die Klasse heißt `…Z` (Bitfeld-Convention bei ELO), erwarten stringifizierte Zahlen.
+**Lesson learned:** An **empty 400 with no body** in a JSON-RPC-ish API
+almost always points to a deserialisation failure, not business-logic
+validation. Fields typed as `string` in OpenAPI whose class name ends in
+`…Z` (ELO's bit-field convention) really want stringified numbers.
 
 ---
 
-## 7. Sessionverlust wurde nicht erkannt (nur IX-Exception, kein HTTP 401)
+## 7. Session expiry not detected (only IX-exception, not HTTP 401)
 
-**Symptom:** Bei abgelaufener Session keine automatische Re-Authentifizierung.
+**Symptom:** When the session expired, no automatic re-authentication
+happened.
 
-**Ursache:** `isInvalidSession()` prüfte nur auf die IX-Exception-Strings `INVALID_SESSION` und `2001`. nginx liefert bei abgelaufenem Cookie aber HTTP 401, das durchs Sieb fiel.
+**Cause:** `isInvalidSession()` only matched IX exception strings
+`INVALID_SESSION` and `2001`. nginx, however, returns HTTP 401 when the
+cookie expires — that fell through our filter.
 
 **Fix:**
 
@@ -129,43 +179,65 @@ export const SORD_Z_ALL = { bset: '-1' } as const;  // alle Bits → alle Member
 private isInvalidSession(err: unknown): boolean {
   if (!axios.isAxiosError(err)) return false;
   if (err.response?.status === 401) return true;
-  // … IX-Exception-Check
+  // … IX exception check
 }
 ```
 
 ---
 
-## 8. Axios-Fehler verschluckten ELO-Detailmeldungen
+## 8. Axios errors swallowed ELO detail messages
 
-**Symptom:** Im Log stand nur `Request failed with status code 400` — keine Information, was IX wirklich beanstandete.
+**Symptom:** The log only said `Request failed with status code 400` —
+nothing about what IX actually rejected.
 
-**Ursache:** `asError()` loggte nur `err.message`. Der eigentliche IX-Exception-Body in `response.data.exception` wurde verworfen.
+**Cause:** `asError()` only logged `err.message`. The real IX exception body
+in `response.data.exception` was discarded.
 
-**Fix:** `enrichAxiosError()` extrahiert die IX-Exception aus dem Response-Body, und `assertNoException()` wirft auch bei HTTP 200 + `exception`-Body. Beides in `EloClient.request()` verdrahtet.
+**Fix:** `enrichAxiosError()` extracts the IX exception from the response
+body, and `assertNoException()` throws when an HTTP 200 carries an
+`exception` field. Both wired into `EloClient.request()`.
 
-**Lesson learned:** Bei jedem axios-basierten Client sofort einen Error-Wrapper bauen, der `err.response?.data` extrahiert. Sonst verbrennt man Stunden, weil die Server-seitige Diagnose nie sichtbar wird.
-
----
-
-## 9. `elo_get_metadata` lieferte „No object … found" trotz gültiger objId
-
-**Symptom:** `elo_get_metadata` mit `objId: 520079` (existierendes Dokument „Rügeschreiben") warf `Error: No object with objId=520079 found.`
-
-**Ursache:** Das Tool rief `/rest/IXServicePortIF/checkoutSord` auf. In dieser IX-Version liefert `checkoutSord` zwar eine `EditInfo`-Struktur (mit `keywords`, `markerNames`, `mask`, `pathNames`, `sordTypes`, `aspectInfos`, …), aber das `sord`-Feld bleibt unabhängig von `editInfoZ` immer leer. Probe gegen `checkoutDoc` mit identischem Body lieferte das vollständige `result.sord` (id, name, objKeys, …) zurück.
-
-**Fix:** Endpoint in [`elo_get_metadata.ts`](src/tools/elo_get_metadata.ts#L39) auf `checkoutDoc` umgestellt — gleicher Body, gleiches Response-Schema laut OpenAPI (`BResult_820228328` für beide), aber Verhalten unterschiedlich. `elo_get_document_link` nutzt `checkoutDoc` bereits, also konsistent.
-
-**Lesson learned:** OpenAPI-Schema und Laufzeit-Verhalten gleichnamiger ELO-IX-Methoden können auseinanderlaufen. Wenn ein Feld trotz korrektem `bset: '-1'` fehlt, alternative Methoden mit ähnlicher Signatur probieren.
-
-**Caveat:** `checkoutDoc` ist für Dokumente konzipiert. Für reine Folder-objIds könnte ein Fallback auf `checkoutSord` mit verschachteltem `editInfoZ: { bset:'-1', sordZ:{bset:'-1'} }` nötig werden — bei Loupz aber bisher unkritisch, weil Metadaten-Lookups praktisch nur auf Dokumente gehen.
+**Lesson learned:** With any axios-based client, build an error wrapper that
+extracts `err.response?.data` immediately. Otherwise you burn hours because
+the server-side diagnosis is never surfaced.
 
 ---
 
-## 10. `ELO_WEBCLIENT_URL` zeigte auf den IX-Plugin-Proxy, nicht auf den Webclient
+## 9. `elo_get_metadata` returned "No object … found" for valid objIds
 
-**Symptom:** Generierte Links wie `iegeelodev01:9090/ix-LOUPZ/plugin/de.elo.ix.plugin.proxy/web/app/document/520079` landeten beim Klicken im Nichts.
+**Symptom:** `elo_get_metadata` with a known existing document objId threw
+`Error: No object with objId=<id> found.`
 
-**Ursache:** `.env.example` hatte als Platzhalter `https://elo.loupz.de/elo-webclient` und im Code-Pfad `…/app/document/<objId>` angenommen. Tatsächlich nutzt Loupz einen separaten **Short-Link-Service** unter `https://elo-link.loupz.de`, der per `/<objId>` direkt auf das Dokument im Web-Client redirected. Der `?title=…`-Query-Parameter ist kosmetisch (Browser-Tab-Title).
+**Cause:** The tool called `/rest/IXServicePortIF/checkoutSord`. In this IX
+version, `checkoutSord` returns an `EditInfo` shell (with `keywords`,
+`markerNames`, `mask`, `pathNames`, `sordTypes`, `aspectInfos`, …) but the
+`sord` field stays empty regardless of `editInfoZ`. Probing with
+`checkoutDoc` and the same body returned the complete `result.sord` (id,
+name, objKeys, …).
+
+**Fix:** Switched the endpoint in
+[`elo_get_metadata.ts`](src/tools/elo_get_metadata.ts) to `checkoutDoc` —
+same body, same response schema in the OpenAPI spec (`BResult_820228328`),
+different runtime behaviour. `elo_get_document_link` already used
+`checkoutDoc`, so the choice is consistent.
+
+**Lesson learned:** OpenAPI schemas and runtime behaviour of similarly-named
+ELO IX methods can drift. If a field stays empty despite `bset: '-1'`, try
+the sibling method with the same signature.
+
+---
+
+## 10. `ELO_WEBCLIENT_URL` pointed at the IX plugin proxy, not the web client
+
+**Symptom:** Generated links like
+`<internal-host>:9090/ix-INSTANCE/plugin/de.elo.ix.plugin.proxy/web/app/document/520079`
+went nowhere when clicked.
+
+**Cause:** The placeholder in `.env.example` was a generic web-client URL,
+and the code path assumed `…/app/document/<objId>`. The actual installation
+used a separate **short-link service** at a different domain that redirects
+`/<objId>` directly to the web-client view. The `?title=…` query parameter
+is cosmetic (browser tab title).
 
 **Fix:**
 
@@ -178,35 +250,42 @@ const eloLink = `${webBase}/${args.objId}${titleParam}`;
 eloLink: `${webBase}/${s.id}?title=${encodeURIComponent(s.name)}`,
 ```
 
-`.env.example` und README angepasst:
+The `.env.example` and the README now tell users to verify
+`ELO_WEBCLIENT_URL` empirically by opening a document in the browser.
 
-```env
-ELO_WEBCLIENT_URL=https://elo-link.loupz.de
-```
-
-**Lesson learned:** ELO-Installations haben oft **drei** URL-Räume parallel — IX REST API, IX Plugin Proxy (Backend-zu-Backend), und Webclient (Human-facing). Den Webclient-URL niemals raten, sondern einmal empirisch im Browser kopieren.
+**Lesson learned:** ELO installations often have **three** parallel URL
+spaces — the IX REST API, the IX plugin proxy (backend-to-backend), and the
+human-facing web client. Never guess; copy the URL prefix once from the
+browser.
 
 ---
 
-## 11. `refPaths` falsch genestet → `firstRefPath.map is not a function`
+## 11. `refPaths` shaped differently than assumed → `firstRefPath.map is not a function`
 
-**Symptom:** `elo_find_project_folder` warf `Error: firstRefPath.map is not a function` für jede gefundene Folder-objId.
+**Symptom:** `elo_find_project_folder` threw `Error: firstRefPath.map is not
+a function` for every folder hit.
 
-**Ursache:** Die Annahme in [`elo_find_project_folder.ts`](src/tools/elo_find_project_folder.ts) und im Typ `EloSord.refPaths` war `refPaths: EloRefPathItem[][]` — also Array aus Item-Arrays. Tatsächlich liefert ELO IX `refPaths` als Array aus **Objekten**, jedes mit `path: EloRefPathItem[]` und einem pre-konkatenierten `pathAsString` (Separator `¶`).
+**Cause:** The code and the `EloSord.refPaths` type assumed
+`refPaths: EloRefPathItem[][]` — an array of item arrays. In reality, ELO IX
+returns `refPaths` as an array of **objects**, each with a `path:
+EloRefPathItem[]` field and a pre-joined `pathAsString` (separator: pilcrow
+`¶`).
 
-Live-Beispiel:
+Live example:
+
 ```json
 "refPaths": [{
   "path": [
-    { "id": 6411, "name": "Projekte", "guid": "…" },
-    { "id": 6618, "name": "Projektmanagement", "guid": "…" },
+    { "id": 6411, "name": "Projects", "guid": "…" },
+    { "id": 6618, "name": "Project Management", "guid": "…" },
     …
   ],
-  "pathAsString": "¶Projekte¶Projektmanagement¶…"
+  "pathAsString": "¶Projects¶Project Management¶…"
 }]
 ```
 
-**Fix:** Neuer Typ `EloRefPathInfo`, `EloSord.refPaths` darauf umgestellt, im Tool eine Indirektion mehr:
+**Fix:** Added the `EloRefPathInfo` type, switched `EloSord.refPaths` to use
+it, and added one indirection in the tool:
 
 ```ts
 // types.ts
@@ -221,17 +300,28 @@ const firstRefPath = s.refPaths?.[0]?.path ?? [];
 const path = firstRefPath.map((p) => p.name).join('/');
 ```
 
-**Lesson learned:** Bei ELO IX immer den echten JSON-Body anschauen, bevor man Typen aus dem OpenAPI-Schema ableitet — die Java-Typen-Namen (`RefPath` vs. `RefPathInfo`) sind subtil, und ein verirrter Plural im Schema-Namen kann eine Verschachtelungs-Ebene verschleiern.
+**Lesson learned:** With ELO IX, always look at a real JSON body before
+inferring types from the OpenAPI schema. The Java type names (`RefPath`
+vs. `RefPathInfo`) are easy to confuse, and a stray plural in a schema name
+can hide a level of nesting.
 
 ---
 
-## 12. `EditInfoZ` ohne nested `sordZ` → leere `objKeys` bei Ordnern
+## 12. `EditInfoZ` without nested `sordZ` → empty `objKeys` for folders
 
-**Symptom:** `elo_get_metadata` auf einer Projektordner-objId (z. B. 509901) lieferte einen vollständigen Sord (Name, Maskenname, Owner), aber `indexFields: {}`. Damit blieb auch `elo_find_project_folder` ohne Projektnummer-Lookup.
+**Symptom:** `elo_get_metadata` on a folder objId (e.g. a project folder)
+returned a full sord (name, mask, owner) but `indexFields: {}`. As a result
+`elo_find_project_folder` had no way to look up the project number.
 
-**Ursache:** `EditInfoZ` ist ein **verschachtelter** Selector: das äußere `bset` steuert nur, welche EditInfo-Felder zurückkommen (sord, document, keywords, …). Welche **Member innerhalb der einzelnen Objekte** (z. B. `sord.objKeys`) populär werden, steuert das **genested** `sordZ`. Ohne dieses gibt IX einen Sord mit Basisfeldern zurück, aber ohne Index-Daten — sieht aus wie ein leerer Sord.
+**Cause:** `EditInfoZ` is a **nested** selector. The outer `bset` controls
+which EditInfo top-level fields come back (sord, document, keywords, …). To
+control which **members of the contained sord** are populated (e.g.
+`sord.objKeys`), you must also set the **nested** `sordZ`. Without it, IX
+returns the sord with base fields but no index data — and the result looks
+like an empty sord.
 
-**Fix:** [`src/elo/constants.ts`](src/elo/constants.ts) — `EDIT_INFO_Z_ALL` ergänzt:
+**Fix:** Extended `EDIT_INFO_Z_ALL` in
+[`src/elo/constants.ts`](src/elo/constants.ts):
 
 ```ts
 export const EDIT_INFO_Z_ALL = {
@@ -240,27 +330,37 @@ export const EDIT_INFO_Z_ALL = {
 } as const;
 ```
 
-Bonus-Erkenntnis aus dem gleichen Probe: an Loupz heißt das Projektnummer-Indexfeld **`PRJ_NO`** (nicht `PROJEKTNUMMER`), das Namensfeld `PRJ_NAME`, und Projektordner sind durch `SOL_TYPE = "PROJEKT"` markiert. [`src/tools/elo_find_project_folder.ts`](src/tools/elo_find_project_folder.ts) entsprechend angepasst.
+Bonus finding from the same probe: project folders in the ELO Solutions
+standard project mask carry `PRJ_NO` (project number) and `PRJ_NAME`
+(human-readable name), with `SOL_TYPE = "PROJEKT"` marking them as project
+folders. The field name is exposed as `ELO_PROJECT_NUMBER_FIELD` env var
+(default `PRJ_NO`) so custom masks can override it.
 
-**Lesson learned:** Bei ELO IX `Z`-Selektoren immer die nested Selektoren mit­spezifizieren. Das Schema-Pattern in der OpenAPI verschleiert das, weil jedes `…Z` als `{ bset: string }` dargestellt wird — die nested Members tauchen erst auf, wenn man die Java-Class anschaut.
+**Lesson learned:** For every ELO IX `…Z` selector, always specify the
+nested selectors as well. The pattern is hidden in the OpenAPI schema
+because every `…Z` renders as `{ bset: string }` — the nested members only
+surface when you look at the underlying Java class.
 
 ---
 
-## Zusammenfassung der Loupz-spezifischen Eigenheiten
+## Summary of ELO IX gotchas
 
-| Aspekt | Verhalten bei Loupz |
+| Aspect | What we observed |
 |---|---|
-| Auth-Schichten | nginx Basic Auth **vor** IX, IX-Session per JSESSIONID-Cookie. Login-Pfad ist nginx-Auth-frei. |
-| Token-Mechanismus | Cookie-basiert. Login-Response gibt `ticket: "de.elo.ix.client.ticket_from_cookie"` zurück → Header `x-ELOIX-Ticket` wirkungslos. |
-| Required body fields | `ci` muss auf **jedem** Call mit, **minimal** gehalten (nur Ticket/Sprache/Land/Zeitzone). |
-| Bitset-Felder (`…Z`) | Wire-Format: `{ bset: "<stringified-int>" }`. `-1` = alle Member. Konstantennamen wie `mb_all` triggern 400 ohne Body. |
-| Fehlersignalisierung | IX selbst → HTTP 200 + `exception`-Body. nginx → echte 4xx mit HTML- oder leerem Body. Beides separat behandeln. |
-| Methoden-Konsistenz | OpenAPI-Schemas und Laufzeit-Verhalten gleichnamiger Methoden divergieren. `checkoutSord` liefert leere `sord`-Felder, obwohl Schema und Bset stimmen — nutze `checkoutDoc`. |
-| URL-Räume | Drei getrennte: IX REST API (`elo.loupz.de/ix-LOUPZ`), IX Plugin Proxy (backend-only), Webclient-Short-Link (`elo-link.loupz.de/<objId>`). |
-| Nested Refs | `Sord.refPaths` ist `RefPathInfo[]` (mit `.path` + `.pathAsString`), nicht `RefPathItem[][]`. |
+| Auth layers | nginx Basic Auth **in front of** IX, IX session via `JSESSIONID` cookie. The login path is exempt from nginx auth. |
+| Token mechanism | Cookie-based. The login response returns `ticket: "de.elo.ix.client.ticket_from_cookie"` → the `x-ELOIX-Ticket` header is a no-op here. |
+| Required body fields | `ci` is required on **every** call, kept minimal (ticket / language / country / timezone only). |
+| Bitset fields (`…Z`) | Wire format: `{ bset: "<stringified-int>" }`. `-1` = all members. Named constants like `mb_all` trigger an empty 400. |
+| Error signalling | IX itself → HTTP 200 with an `exception` body. nginx → real 4xx with HTML or empty body. Handle both. |
+| Method consistency | OpenAPI schemas and runtime behaviour of similarly-named methods can diverge. `checkoutSord` returns empty `sord` fields here even with the right `bset`; use `checkoutDoc`. |
+| URL spaces | Three separate ones: IX REST API, IX Plugin Proxy (backend-only), web client / link service. |
+| Nested refs | `Sord.refPaths` is `RefPathInfo[]` (with `.path` + `.pathAsString`), not `RefPathItem[][]`. |
+| Nested `Z` selectors | `EditInfoZ` needs a nested `sordZ` to populate `sord.objKeys`. The outer bset alone is not enough. |
 
 ---
 
-## Offene Punkte
+## Open items
 
-- **Passwort-Rotation:** Während des Debuggings wurden Credentials in Klartext in der Probe-Script-Output gepostet. Das ELO-Passwort sollte rotiert werden.
+- **Password rotation:** during debugging, credentials appeared briefly in
+  probe-script output captured in chat history. Rotate the ELO password if
+  you suspect any exposure.

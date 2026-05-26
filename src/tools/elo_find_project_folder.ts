@@ -3,14 +3,9 @@ import { EloClient } from '../elo/client.js';
 import { isFolder, SORD_Z_ALL } from '../elo/constants.js';
 import type { FindResponse } from '../elo/types.js';
 
-// Verified at Loupz: project folders use `PRJ_NO` as the index field for the
-// project number and `PRJ_NAME` for the human-readable name. Folders that
-// represent a project carry `SOL_TYPE = "PROJEKT"`.
-const PROJECT_NUMBER_INDEX_FIELD = 'PRJ_NO';
-
 export const FindProjectFolderInputSchema = {
   projectNumber: z.string().optional().describe('Project number (e.g. "2025-001")'),
-  projectName: z.string().optional().describe('Project name (e.g. "Kunde XYZ")'),
+  projectName: z.string().optional().describe('Project name (e.g. "Customer XYZ")'),
 };
 
 const FindProjectFolderArgs = z
@@ -28,14 +23,16 @@ export interface ProjectFolder {
   projectNumber?: string;
 }
 
-export interface BuildLinkOptions {
+export interface FindProjectFolderOptions {
   webclientBaseUrl: string;
+  /** Name of the ELO index field that holds the project number. */
+  projectNumberField: string;
 }
 
 export async function eloFindProjectFolder(
   client: EloClient,
   args: FindProjectFolderArgs,
-  options: BuildLinkOptions,
+  options: FindProjectFolderOptions,
 ): Promise<ProjectFolder[]> {
   const query = args.projectNumber ?? args.projectName ?? '';
   if (!query) {
@@ -68,7 +65,7 @@ export async function eloFindProjectFolder(
     const firstRefPath = s.refPaths?.[0]?.path ?? [];
     const path = firstRefPath.map((p) => p.name).join('/');
     const projectNumber = s.objKeys?.find(
-      (k) => k.name === PROJECT_NUMBER_INDEX_FIELD,
+      (k) => k.name === options.projectNumberField,
     )?.data?.[0];
 
     return {

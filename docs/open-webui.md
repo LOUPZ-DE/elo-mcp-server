@@ -1,57 +1,59 @@
-# Open WebUI / OpenAPI-Anbindung
+# Open WebUI / OpenAPI integration
 
-Anleitung, um den ELO-MCP-Server als Tool in [Open WebUI](https://github.com/open-webui/open-webui) verfügbar zu machen.
+How to make the ELO MCP server available as a tool inside
+[Open WebUI](https://github.com/open-webui/open-webui).
 
-## Architektur
+## Architecture
 
 ```
                                     Easypanel
                                   ┌─────────────────────────────────────────┐
    ┌──────────────┐               │  mcpo                ELO MCP Server     │
-   │  Open WebUI  │ ── HTTPS ───► │  ghcr.io/open-webui  Dockerfile aus     │
-   │  (anderswo)  │   Bearer:     │  /mcpo:latest        Repo               │
+   │  Open WebUI  │ ── HTTPS ───► │  ghcr.io/open-webui  Dockerfile from    │
+   │  (elsewhere) │   Bearer:     │  /mcpo:latest        this repo          │
    └──────────────┘   <mcpo-key>  │     │                   ▲                │
                                   │     │   HTTPS Bearer:   │                │
                                   │     └── <elo-secret> ───┘                │
                                   └─────────────────────────────────────────┘
 ```
 
-Hintergrund: Open WebUI versteht **OpenAPI** (REST + `openapi.json`), unser
-Server spricht **MCP** (JSON-RPC über Streamable HTTP). Die offizielle Brücke
-von Open WebUI ist [`mcpo`](https://github.com/open-webui/mcpo) — sie
-introspectet die MCP-Tools und veröffentlicht sie als OpenAPI-Endpoints.
+Background: Open WebUI speaks **OpenAPI** (REST + `openapi.json`), our
+server speaks **MCP** (JSON-RPC over Streamable HTTP). Open WebUI's official
+bridge is [`mcpo`](https://github.com/open-webui/mcpo) — it introspects the
+MCP tools and republishes them as OpenAPI endpoints.
 
-## Voraussetzungen
+## Prerequisites
 
-1. **ELO-MCP-Server läuft auf Easypanel** mit `MCP_TRANSPORT=http`,
-   öffentlicher HTTPS-Domain und gesetztem `MCP_SHARED_SECRET`. Siehe
+1. **The MCP server runs on Easypanel** with `MCP_TRANSPORT=http`, a public
+   HTTPS domain, and `MCP_SHARED_SECRET` set. See
    [README → Remote hosting (Easypanel)](../README.md).
-2. **Open WebUI** läuft irgendwo erreichbar (eigener Host, Cloud, Easypanel).
-3. Workspace-Admin-Rechte in Open WebUI, um Tools/Connections hinzuzufügen.
+2. **Open WebUI** runs somewhere reachable (its own host, cloud, or
+   Easypanel).
+3. Workspace admin rights in Open WebUI to add Tools/Connections.
 
-## 1. mcpo-Service in Easypanel anlegen
+## 1. Deploy mcpo as a separate Easypanel service
 
-**Easypanel → Create App → Source: Docker Image** (nicht GitHub-Repo).
+**Easypanel → Create App → Source: Docker Image** (not GitHub repo).
 
-| Feld | Wert |
+| Field | Value |
 |---|---|
 | Image | `ghcr.io/open-webui/mcpo:latest` |
-| Container Port | `8000` |
-| Domain | `mcpo.<deine-domain>` (TLS automatisch) |
-| Mount Volume | Persistent Volume `mcpo-config` → `/app/config` |
-| Command (Args) | `--port 8000 --api-key $MCPO_API_KEY --config /app/config/config.json` |
+| Container port | `8000` |
+| Domain | `mcpo.<your-domain>` (TLS handled automatically) |
+| Mounted volume | Persistent volume `mcpo-config` → `/app/config` |
+| Command (args) | `--port 8000 --api-key $MCPO_API_KEY --config /app/config/config.json` |
 | Env | `MCPO_API_KEY=<random ≥32 bytes>` |
 
-### Config-Datei
+### Config file
 
-`/app/config/config.json` über den Easypanel-File-Browser hochladen:
+Upload `/app/config/config.json` through Easypanel's file browser:
 
 ```json
 {
   "mcpServers": {
     "elo": {
       "type": "streamable_http",
-      "url": "https://elo-mcp.<deine-domain>/mcp",
+      "url": "https://<your-elo-mcp-domain>/mcp",
       "headers": {
         "Authorization": "Bearer <MCP_SHARED_SECRET>"
       }
@@ -60,84 +62,83 @@ introspectet die MCP-Tools und veröffentlicht sie als OpenAPI-Endpoints.
 }
 ```
 
-`MCP_SHARED_SECRET` ist der Wert, den der ELO-MCP-Service als Env hat — **nicht**
-derselbe wie `MCPO_API_KEY`. Zwei verschiedene Tokens für zwei verschiedene
-Auth-Hops.
+`MCP_SHARED_SECRET` is the value set as an env on the ELO MCP service —
+**not** the same as `MCPO_API_KEY`. Two distinct tokens for two distinct
+auth hops.
 
-> ⚠️ Die Schlüsselnamen in der mcpo-Config (`streamable_http`, `streamable-http`,
-> `sse`) variieren zwischen mcpo-Versionen. Wenn nach dem ersten Start im
-> mcpo-Log eine „unknown transport type"-Meldung erscheint, in den
-> [mcpo-Docs](https://github.com/open-webui/mcpo) den aktuellen Schlüsselnamen
-> nachschlagen und anpassen.
+> ⚠️ The transport type key in mcpo's config (`streamable_http`,
+> `streamable-http`, `sse`) varies between mcpo versions. If the mcpo log
+> shows "unknown transport type" after the first start, check the current
+> [mcpo docs](https://github.com/open-webui/mcpo) for the right key name.
 
-## 2. Tool in Open WebUI registrieren
+## 2. Register the tool in Open WebUI
 
-In Open WebUI, je nach Version unter **Admin Panel → Settings → Tools**
-(manche Versionen: **Connections → OpenAPI Tools**):
+In Open WebUI, depending on the version, under **Admin Panel → Settings →
+Tools** (some versions: **Connections → OpenAPI Tools**):
 
-| Feld | Wert |
+| Field | Value |
 |---|---|
-| URL | `https://mcpo.<deine-domain>/elo` |
+| URL | `https://mcpo.<your-domain>/elo` |
 | Type | OpenAPI |
-| API Key / Auth | `MCPO_API_KEY`, als Bearer-Header |
+| API Key / Auth | `MCPO_API_KEY`, as a Bearer header |
 
-Open WebUI zieht das OpenAPI-Schema von `https://mcpo.<deine-domain>/elo/openapi.json`
-und macht aus jedem ELO-Tool eine Funktion: `elo_search`, `elo_get_metadata`,
-`elo_get_document_link`, `elo_find_project_folder`.
+Open WebUI fetches the OpenAPI schema from
+`https://mcpo.<your-domain>/elo/openapi.json` and exposes each ELO tool as a
+function: `elo_search`, `elo_get_metadata`, `elo_get_document_link`,
+`elo_find_project_folder`.
 
-## 3. Verifikation
+## 3. Verification
 
 ```bash
-# 1. mcpo lebt und liefert das OpenAPI-Index
-curl -sf https://mcpo.<deine-domain>/openapi.json | jq '.info.title'
+# 1. mcpo is alive and serves the OpenAPI index
+curl -sf https://mcpo.<your-domain>/openapi.json | jq '.info.title'
 
-# 2. mcpo sieht ELO-MCP und mappt die Tools
+# 2. mcpo sees the ELO MCP server and maps its tools
 curl -sf -H "Authorization: Bearer $MCPO_API_KEY" \
-  https://mcpo.<deine-domain>/elo/openapi.json | jq '.paths | keys'
-# erwartete Pfade: /elo_search, /elo_get_metadata, /elo_get_document_link, /elo_find_project_folder
+  https://mcpo.<your-domain>/elo/openapi.json | jq '.paths | keys'
+# expected paths: /elo_search, /elo_get_metadata, /elo_get_document_link, /elo_find_project_folder
 
-# 3. End-to-end durchgereicht
-curl -sf -X POST https://mcpo.<deine-domain>/elo/elo_search \
+# 3. End-to-end through the chain
+curl -sf -X POST https://mcpo.<your-domain>/elo/elo_search \
   -H "Authorization: Bearer $MCPO_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"query":"Vertrag","maxResults":3}'
+  -d '{"query":"Contract","maxResults":3}'
 ```
 
-Wenn `3.` echte Sord-Daten zurückgibt, ist die Kette komplett. Im Open-WebUI-Chat
-lässt sich dann „Suche in ELO nach Vertrag" abfragen und der Assistent ruft das
-Tool eigenständig auf.
+If step 3 returns real Sord data, the chain works end-to-end. From the Open
+WebUI chat you can then say "Search ELO for Contract" and the assistant will
+call the tool on its own.
 
-## Token-Hygiene
+## Token hygiene
 
-Drei Tokens sind im Spiel — alle verschieden, jeweils ≥32 random Bytes:
+Three tokens are in play — all distinct, each ≥32 random bytes:
 
 ```powershell
 node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
 ```
 
-| Token | Schützt | Wo gesetzt |
+| Token | Protects | Where it lives |
 |---|---|---|
-| `MCP_SHARED_SECRET` | ELO-MCP | Easypanel-Env am ELO-MCP-Service, **und** im Authorization-Header in mcpo's `config.json` |
-| `MCPO_API_KEY` | mcpo | Easypanel-Env am mcpo-Service, in Open WebUI als Bearer-Token |
-| Open WebUI User-Auth | Open WebUI selbst | Open WebUI-eigene User-Verwaltung |
+| `MCP_SHARED_SECRET` | The MCP server | Easypanel env on the MCP service, **and** as the Authorization header value inside mcpo's `config.json` |
+| `MCPO_API_KEY` | mcpo | Easypanel env on the mcpo service, and as the Bearer token in Open WebUI |
+| Open WebUI user auth | Open WebUI itself | Open WebUI's own user management |
 
 ## Troubleshooting
 
-| Symptom | Wahrscheinliche Ursache |
+| Symptom | Likely cause |
 |---|---|
-| `mcpo` startet, aber `/elo/openapi.json` ist 404 | mcpo erreicht ELO-MCP nicht — URL oder Token falsch. Im mcpo-Log nach Connect-Fehlern suchen. |
-| `unknown transport type` im mcpo-Log | mcpo-Version verwendet anderen Schlüssel als `streamable_http`. Aktuelle mcpo-Docs prüfen. |
-| `/elo/elo_search` liefert 401 | Falsche oder fehlende `Authorization: Bearer`-Header. mcpo's `--api-key` muss übereinstimmen. |
-| `/elo/elo_search` liefert IX-Fehler 401/400 | ELO-MCP läuft, aber kann ELO-IX nicht erreichen oder Credentials sind weg. ELO-MCP-Logs in Easypanel prüfen. |
-| Tool taucht in Open WebUI nicht im Chat auf | Tool-Discovery in Open WebUI explizit neu triggern (Tool-Editor öffnen, speichern). |
+| `mcpo` starts but `/elo/openapi.json` is 404 | mcpo cannot reach the MCP server — URL or token wrong. Look at the mcpo log for connect errors. |
+| `unknown transport type` in the mcpo log | mcpo version uses a different key than `streamable_http`. Check current mcpo docs. |
+| `/elo/elo_search` returns 401 | Wrong or missing `Authorization: Bearer` header. mcpo's `--api-key` must match. |
+| `/elo/elo_search` returns an IX error (401/400) | The MCP server is alive but cannot reach ELO IX, or credentials drifted. Inspect the MCP service logs in Easypanel. |
+| Tool does not appear in the Open WebUI chat | Trigger tool discovery again — open the tool editor and save. |
 
-## Sicherheitsnotizen
+## Security notes
 
-- `MCP_SHARED_SECRET` darf **nirgendwo** im mcpo-Service in Logs landen. mcpo
-  loggt Headers nicht standardmäßig, aber bei `--debug` schon.
-- mcpo's `/openapi.json` ohne den Server-Namen ist **öffentlich** ohne Auth
-  erreichbar und listet die registrierten Server-Namen auf. Bei sensitiven
-  Servernamen darauf achten.
-- mcpo und ELO-MCP im selben Easypanel: alternativ über das **interne
-  Docker-Netz** (`http://<service-name>:3000/mcp`) statt über die Public-Domain
-  ansprechen. Spart einen TLS-Hop, reduziert Angriffsfläche.
+- `MCP_SHARED_SECRET` must **never** end up in mcpo logs. mcpo does not log
+  headers by default, but `--debug` will.
+- mcpo's `/openapi.json` (without a server name) is reachable **without
+  auth** and lists registered server names. Avoid sensitive server names.
+- If mcpo and the MCP server live on the same Easypanel host, prefer the
+  **internal Docker network** (`http://<service-name>:3000/mcp`) over the
+  public domain. Saves a TLS hop and reduces the attack surface.

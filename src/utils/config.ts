@@ -14,6 +14,10 @@ const ConfigSchema = z.object({
   ELO_LANGUAGE: z.string().default('de'),
   ELO_COUNTRY: z.string().default('DE'),
   ELO_TIMEZONE: z.string().default('UTC'),
+  // Name of the ELO index field that holds the project number on your masks.
+  // Default `PRJ_NO` matches the ELO Solutions standard project mask. Override
+  // for custom mask designs.
+  ELO_PROJECT_NUMBER_FIELD: z.string().default('PRJ_NO'),
   LOG_LEVEL: z.enum(['trace', 'debug', 'info', 'warn', 'error', 'fatal']).default('info'),
 
   // Transport: `stdio` for local Claude Desktop subprocess usage; `http` for

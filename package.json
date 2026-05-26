@@ -1,7 +1,7 @@
 {
   "name": "elo-mcp-server",
   "version": "0.1.0",
-  "description": "MCP server providing read-only access to ELO Document Management for AI agents.",
+  "description": "Read-only Model Context Protocol (MCP) server for the ELO Digital Office document management system. Exposes search, metadata, document links, and project-folder lookups to LLM agents via stdio and Streamable HTTP transports.",
   "type": "module",
   "bin": {
     "elo-mcp-server": "./dist/index.js"
@@ -11,6 +11,33 @@
     "dist",
     "README.md",
     ".env.example"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LOUPZ-DE/elo-mcp-server.git"
+  },
+  "bugs": {
+    "url": "https://github.com/LOUPZ-DE/elo-mcp-server/issues"
+  },
+  "homepage": "https://github.com/LOUPZ-DE/elo-mcp-server#readme",
+  "author": "Loupz Engineering GmbH",
+  "license": "CC-BY-NC-4.0",
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "elo",
+    "elo-digital-office",
+    "document-management",
+    "claude",
+    "claude-desktop",
+    "openai",
+    "open-webui",
+    "n8n",
+    "notion",
+    "typescript",
+    "nodejs",
+    "easypanel"
   ],
   "scripts": {
     "build": "tsc",
