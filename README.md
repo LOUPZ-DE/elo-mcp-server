@@ -171,7 +171,8 @@ containing the MCP message.
 
 For a complete record of the implementation pitfalls encountered while
 talking to ELO IX REST — and how they were resolved — see
-[`BUGFIXES.md`](BUGFIXES.md).
+[`BUGFIXES.md`](BUGFIXES.md). Release notes live in
+[`CHANGELOG.md`](CHANGELOG.md).
 
 ## Roadmap
 
