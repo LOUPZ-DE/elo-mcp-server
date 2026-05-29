@@ -6,22 +6,18 @@ set -e
 : "${UPSTREAM_SECRET:?UPSTREAM_SECRET is required}"
 
 PORT="${MCPO_PORT:-8000}"
-CONFIG_DIR="/tmp/cfg"
-CONFIG_FILE="$CONFIG_DIR/config.json"
 
-mkdir -p "$CONFIG_DIR"
-cat > "$CONFIG_FILE" <<EOF
-{
-  "mcpServers": {
-    "elo": {
-      "type": "streamable_http",
-      "url": "${UPSTREAM_URL}",
-      "headers": {
-        "Authorization": "Bearer ${UPSTREAM_SECRET}"
-      }
-    }
-  }
-}
-EOF
-
-exec mcpo --port "$PORT" --api-key "$MCPO_API_KEY" --config "$CONFIG_FILE"
+# Single-server mode: the OpenAPI spec is exposed at /openapi.json and tool
+# endpoints at /<toolname> (no per-server prefix). This is the shape Open WebUI's
+# "Tool Server" feature expects — its connection test GETs the URL and then
+# auto-appends /openapi.json for discovery; both succeed against the root.
+#
+# (Multi-server mode with --config would expose the spec at /<server>/openapi.json,
+# which is rejected by Open WebUI v0.9.x because <URL>/openapi.json gets
+# rewritten to <URL>/openapi.json/openapi.json.)
+exec mcpo \
+  --port "$PORT" \
+  --api-key "$MCPO_API_KEY" \
+  --server-type streamable_http \
+  --header "Authorization: Bearer $UPSTREAM_SECRET" \
+  -- "$UPSTREAM_URL"

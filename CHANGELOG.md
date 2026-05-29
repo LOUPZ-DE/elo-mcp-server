@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `npm run test:http` smoke test for the HTTP transport (health, auth, MCP
+  initialize, tools/list, optionally tools/call) in `scripts/test-http.ts`.
+- `mcpo/` wrapper image as a fallback OpenAPI bridge for clients without
+  native MCP support. Single-server mode so the spec is at `/openapi.json`.
+- Native MCP path documented as primary recommendation for Open WebUI ≥ 0.9
+  in `docs/open-webui.md`; mcpo bridge demoted to Path B.
+
 ## [0.1.0] - 2026-05-26
 
 First public release.

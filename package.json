@@ -44,6 +44,7 @@
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "test:login": "tsx scripts/test-login.ts",
+    "test:http": "npm run build && tsx scripts/test-http.ts",
     "inspect": "npx @modelcontextprotocol/inspector node dist/index.js",
     "typecheck": "tsc --noEmit"
   },
