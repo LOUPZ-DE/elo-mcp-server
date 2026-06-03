@@ -178,6 +178,43 @@ async function main(): Promise<void> {
     },
   );
 
+  // Regression for the Notion connect failure: a long-lived GET SSE stream must
+  // not block a concurrent POST. With a shared singleton server this threw
+  // "Already connected" → HTTP 500. Each request now gets its own server.
+  await check(
+    'GET /mcp SSE stream open + concurrent POST initialize → 200',
+    async () => {
+      const sseAbort = new AbortController();
+      const sse = await fetch(`${BASE}/mcp`, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${SECRET}`,
+          Accept: 'text/event-stream',
+        },
+        signal: sseAbort.signal,
+      });
+      if (sse.status !== 200) {
+        sseAbort.abort();
+        return sse;
+      }
+      try {
+        // Stream stays open; fire the overlapping POST while it is held.
+        return await jsonRpc(
+          'initialize',
+          {
+            protocolVersion: '2024-11-05',
+            capabilities: {},
+            clientInfo: { name: 'test-http', version: '0.0.0' },
+          },
+          10,
+        );
+      } finally {
+        sseAbort.abort();
+      }
+    },
+    (r) => r.status === 200 || `status=${r.status}`,
+  );
+
   const haveRealElo =
     process.env.ELO_BASE_URL &&
     process.env.ELO_USERNAME &&

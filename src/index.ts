@@ -45,11 +45,6 @@ const projectFolderOptions = {
   projectNumberField: cfg.ELO_PROJECT_NUMBER_FIELD,
 };
 
-const server = new McpServer({
-  name: 'elo-mcp-server',
-  version: '0.1.0',
-});
-
 function asTextResult(payload: unknown) {
   return {
     content: [{ type: 'text' as const, text: JSON.stringify(payload, null, 2) }],
@@ -65,77 +60,90 @@ function asError(err: unknown) {
   };
 }
 
-server.registerTool(
-  'elo_search',
-  {
-    title: 'ELO full-text search',
-    description:
-      'Searches ELO for documents and folders by free-text query, project number, or keyword. Returns id, name, type (document/folder), mask name, owner, last-changed date.',
-    inputSchema: SearchInputSchema,
-  },
-  async (args) => {
-    try {
-      return asTextResult(await eloSearch(eloClient, args));
-    } catch (err) {
-      return asError(err);
-    }
-  },
-);
+// Build a freshly-configured server instance. In stateless HTTP mode a server
+// may only be bound to one transport at a time, so each request gets its own
+// server + transport — otherwise a long-lived GET SSE stream (e.g. Notion's)
+// keeps the singleton bound and a concurrent POST throws "Already connected".
+function createServer(): McpServer {
+  const server = new McpServer({
+    name: 'elo-mcp-server',
+    version: '0.1.0',
+  });
 
-server.registerTool(
-  'elo_get_metadata',
-  {
-    title: 'Get ELO object metadata',
-    description:
-      'Returns index fields, owner, mask, version info for a given ELO objId. Works for both folders and documents.',
-    inputSchema: GetMetadataInputSchema,
-  },
-  async (args) => {
-    try {
-      return asTextResult(await eloGetMetadata(eloClient, args));
-    } catch (err) {
-      return asError(err);
-    }
-  },
-);
+  server.registerTool(
+    'elo_search',
+    {
+      title: 'ELO full-text search',
+      description:
+        'Searches ELO for documents and folders by free-text query, project number, or keyword. Returns id, name, type (document/folder), mask name, owner, last-changed date.',
+      inputSchema: SearchInputSchema,
+    },
+    async (args) => {
+      try {
+        return asTextResult(await eloSearch(eloClient, args));
+      } catch (err) {
+        return asError(err);
+      }
+    },
+  );
 
-server.registerTool(
-  'elo_get_document_link',
-  {
-    title: 'Get ELO document links',
-    description:
-      'Returns a stable ELO webclient link and (when available) a short-lived download URL for a document. Download URLs are valid for ~1–10 minutes only.',
-    inputSchema: GetDocumentLinkInputSchema,
-  },
-  async (args) => {
-    try {
-      return asTextResult(await eloGetDocumentLink(eloClient, args, linkOptions));
-    } catch (err) {
-      return asError(err);
-    }
-  },
-);
+  server.registerTool(
+    'elo_get_metadata',
+    {
+      title: 'Get ELO object metadata',
+      description:
+        'Returns index fields, owner, mask, version info for a given ELO objId. Works for both folders and documents.',
+      inputSchema: GetMetadataInputSchema,
+    },
+    async (args) => {
+      try {
+        return asTextResult(await eloGetMetadata(eloClient, args));
+      } catch (err) {
+        return asError(err);
+      }
+    },
+  );
 
-server.registerTool(
-  'elo_find_project_folder',
-  {
-    title: 'Find ELO project folder',
-    description:
-      'Finds project folders by project number or project name. Filters results to folders only and reconstructs their archive path.',
-    inputSchema: FindProjectFolderInputSchema,
-  },
-  async (args) => {
-    try {
-      return asTextResult(await eloFindProjectFolder(eloClient, args, projectFolderOptions));
-    } catch (err) {
-      return asError(err);
-    }
-  },
-);
+  server.registerTool(
+    'elo_get_document_link',
+    {
+      title: 'Get ELO document links',
+      description:
+        'Returns a stable ELO webclient link and (when available) a short-lived download URL for a document. Download URLs are valid for ~1–10 minutes only.',
+      inputSchema: GetDocumentLinkInputSchema,
+    },
+    async (args) => {
+      try {
+        return asTextResult(await eloGetDocumentLink(eloClient, args, linkOptions));
+      } catch (err) {
+        return asError(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    'elo_find_project_folder',
+    {
+      title: 'Find ELO project folder',
+      description:
+        'Finds project folders by project number or project name. Filters results to folders only and reconstructs their archive path.',
+      inputSchema: FindProjectFolderInputSchema,
+    },
+    async (args) => {
+      try {
+        return asTextResult(await eloFindProjectFolder(eloClient, args, projectFolderOptions));
+      } catch (err) {
+        return asError(err);
+      }
+    },
+  );
+
+  return server;
+}
 
 async function startStdio() {
   const transport = new StdioServerTransport();
-  await server.connect(transport);
+  await createServer().connect(transport);
   logger.info('ELO MCP server connected on stdio');
 }
 
@@ -169,12 +177,14 @@ async function startHttp() {
     // Stateless: a fresh transport per request. Simpler model and fine for
     // automation clients (n8n/Make/Notion-agents/claude.ai) where each call
     // is an independent JSON-RPC exchange.
+    const server = createServer();
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
       enableJsonResponse: true,
     });
     res.on('close', () => {
       transport.close().catch(() => {});
+      server.close().catch(() => {});
     });
     try {
       await server.connect(transport);
