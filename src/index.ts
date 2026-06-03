@@ -60,6 +60,32 @@ function asError(err: unknown) {
   };
 }
 
+// Pull lightweight, non-sensitive identifiers out of a JSON-RPC body so each
+// HTTP request can be logged with the method/id/client it carries. Handles the
+// batch form (array) and the empty body of a GET SSE request.
+function summarizeRpc(body: unknown): {
+  rpcMethod?: string;
+  rpcId?: unknown;
+  client?: string;
+} {
+  const msg = Array.isArray(body) ? body[0] : body;
+  if (!msg || typeof msg !== 'object') return {};
+  const m = msg as Record<string, unknown>;
+  const params =
+    m.params && typeof m.params === 'object'
+      ? (m.params as Record<string, unknown>)
+      : undefined;
+  const clientInfo =
+    params?.clientInfo && typeof params.clientInfo === 'object'
+      ? (params.clientInfo as Record<string, unknown>)
+      : undefined;
+  return {
+    rpcMethod: typeof m.method === 'string' ? m.method : undefined,
+    rpcId: m.id,
+    client: typeof clientInfo?.name === 'string' ? clientInfo.name : undefined,
+  };
+}
+
 // Build a freshly-configured server instance. In stateless HTTP mode a server
 // may only be bound to one transport at a time, so each request gets its own
 // server + transport — otherwise a long-lived GET SSE stream (e.g. Notion's)
@@ -167,22 +193,66 @@ async function startHttp() {
       providedBuf.length === secretBuf.length &&
       timingSafeEqual(providedBuf, secretBuf);
     if (!ok) {
+      // Surface misconfigured connectors (wrong/missing token) — a common cause
+      // of "client won't connect" that is otherwise invisible.
+      logger.warn(
+        {
+          httpMethod: req.method,
+          hasAuthHeader: header.length > 0,
+          providedLength: provided.length,
+        },
+        'MCP request rejected: bad or missing bearer token',
+      );
       res.status(401).json({ error: 'Unauthorized' });
       return;
     }
     next();
   };
 
+  let reqCounter = 0;
+
   app.all('/mcp', requireAuth, async (req, res) => {
     // Stateless: a fresh transport per request. Simpler model and fine for
     // automation clients (n8n/Make/Notion-agents/claude.ai) where each call
     // is an independent JSON-RPC exchange.
+    const rpc = summarizeRpc(req.body);
+    const reqLog = logger.child({
+      reqId: ++reqCounter,
+      httpMethod: req.method,
+      // text/event-stream on a GET signals a long-lived SSE stream (e.g. Notion);
+      // surfacing it makes overlap-with-POST issues visible at a glance.
+      accept: req.header('accept'),
+      ...rpc,
+    });
+    const start = process.hrtime.bigint();
+    reqLog.info('MCP request received');
+
+    let completionLogged = false;
+    const logCompletion = (event: 'finish' | 'close') => {
+      if (completionLogged) return;
+      completionLogged = true;
+      const durationMs = Math.round(
+        Number(process.hrtime.bigint() - start) / 1e6,
+      );
+      const status = res.statusCode;
+      // A close without a finished response means the client hung up (normal
+      // for an SSE stream it chose to drop); don't cry 500 over that.
+      const level =
+        status >= 500 ? 'error' : status >= 400 || event === 'close' ? 'warn' : 'info';
+      reqLog[level](
+        { status, durationMs, closedByClient: event === 'close' },
+        'MCP request completed',
+      );
+    };
+
     const server = createServer();
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
       enableJsonResponse: true,
     });
+    res.on('finish', () => logCompletion('finish'));
     res.on('close', () => {
+      logCompletion('close');
       transport.close().catch(() => {});
       server.close().catch(() => {});
     });
@@ -190,10 +260,9 @@ async function startHttp() {
       await server.connect(transport);
       await transport.handleRequest(req, res, req.body);
     } catch (err) {
-      logger.error(
-        { err: err instanceof Error ? err.message : err },
-        'MCP request handling failed',
-      );
+      // Pass the Error object (not just .message) so pino's serializer records
+      // the stack; reqLog already carries httpMethod + rpcMethod for context.
+      reqLog.error({ err, status: 500 }, 'MCP request handling failed');
       if (!res.headersSent) {
         res.status(500).json({ error: 'Internal Server Error' });
       }
@@ -215,6 +284,16 @@ async function main() {
     await startStdio();
   }
 }
+
+// Last-resort visibility: a rejected promise inside the SSE stream lifecycle or
+// any async path we didn't await would otherwise vanish silently.
+process.on('unhandledRejection', (reason) => {
+  logger.error({ err: reason }, 'Unhandled promise rejection');
+});
+process.on('uncaughtException', (err) => {
+  logger.fatal({ err }, 'Uncaught exception');
+  process.exit(1);
+});
 
 main().catch((err) => {
   logger.fatal({ err: err instanceof Error ? err.message : err }, 'Fatal startup error');

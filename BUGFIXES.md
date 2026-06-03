@@ -343,6 +343,63 @@ surface when you look at the underlying Java class.
 
 ---
 
+## 13. Notion connector failed with HTTP 500 — shared MCP server reused across requests
+
+**Symptom:** Adding the server as a Notion Custom MCP connector failed with
+`SSE error: Non-200 status code (500)`. The identical endpoint worked fine in
+Open WebUI v0.9.5, and `npm run test:http` was green.
+
+**Cause:** The HTTP transport ran a single global `McpServer` instance and
+called `server.connect(transport)` on **every** request. The MCP SDK binds a
+server to exactly one transport at a time — `Protocol.connect()` throws
+`Already connected to a transport` if `_transport` is still set. This is fine
+**serially** (the `res` `close` handler clears the binding between requests),
+but Notion — unlike Open WebUI — opens a **long-lived `GET /mcp` SSE stream**
+(`Accept: text/event-stream`) for server→client messages. That stream keeps the
+singleton bound; a **concurrent `POST /mcp` (initialize)** then calls
+`connect()` again → throw → our catch block returns **HTTP 500**. Notion labels
+the whole exchange "SSE error".
+
+**Fix:** Extract a `createServer()` factory and build a **fresh server (and
+transport) per request** — the pattern the SDK prescribes for stateless mode
+(`sessionIdGenerator: undefined`). Also `server.close()` on response close.
+
+```ts
+app.all('/mcp', requireAuth, async (req, res) => {
+  const server = createServer();          // fresh per request
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: undefined,
+    enableJsonResponse: true,
+  });
+  res.on('close', () => {
+    transport.close().catch(() => {});
+    server.close().catch(() => {});
+  });
+  await server.connect(transport);
+  await transport.handleRequest(req, res, req.body);
+});
+```
+
+Regression test in `scripts/test-http.ts`: hold a `GET /mcp` SSE stream open and
+fire a concurrent `POST initialize` — must return 200 (was 500 before the fix).
+
+**Detection gap that hid this (now fixed):** the original logging had no
+per-request access log, so the `GET /mcp` SSE request was invisible and the lone
+"MCP request handling failed" line carried no HTTP method. The handler now logs
+each request with `httpMethod` / `rpcMethod` / `client` and a completion line
+with `status` + `durationMs`, the `catch` logs the full `Error` (stack via
+pino), `requireAuth` logs 401s, and `process.on('unhandledRejection' …)` catches
+stray async failures. With that, a held-open `GET` plus a `POST` at `status:500`
+is obvious at a glance.
+
+**Lesson learned:** A stateless MCP HTTP server needs a fresh transport **and**
+server per request — one `McpServer` cannot serve a long-lived GET SSE stream
+and a concurrent POST at the same time. A client that "only fails over SSE" is
+the tell. And log the HTTP method on every MCP request, or a transport-layer bug
+is invisible.
+
+---
+
 ## Summary of ELO IX gotchas
 
 | Aspect | What we observed |

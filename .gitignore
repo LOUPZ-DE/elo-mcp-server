@@ -11,3 +11,6 @@ coverage/
 .DS_Store
 .vscode/
 .idea/
+
+# Local session-handoff notes — never publish to the public repo
+context.md
