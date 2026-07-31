@@ -18,7 +18,33 @@ const ConfigSchema = z.object({
   // Default `PRJ_NO` matches the ELO Solutions standard project mask. Override
   // for custom mask designs.
   ELO_PROJECT_NUMBER_FIELD: z.string().default('PRJ_NO'),
+  ELO_PROJECT_NAME_FIELD: z.string().default('PRJ_NAME'),
+  // A project *data room* is marked by an index field, not by its position in
+  // the tree. Without this check a sub-folder whose title happens to match the
+  // query is offered with the same authority as the real project root — which
+  // is how the pilot ended up with links into the wrong project.
+  ELO_PROJECT_MARKER_FIELD: z.string().default('SOL_TYPE'),
+  ELO_PROJECT_MARKER_VALUE: z.string().default('PROJEKT'),
   LOG_LEVEL: z.enum(['trace', 'debug', 'info', 'warn', 'error', 'fatal']).default('info'),
+
+  // --- Document content -----------------------------------------------------
+  // Hard cap on what we will pull out of ELO. Enforced by axios itself, so an
+  // oversized file is rejected mid-transfer rather than after buffering it.
+  ELO_MAX_DOCUMENT_BYTES: z.coerce.number().int().positive().default(15 * 1024 * 1024),
+  // Roughly 12–15k tokens. Larger documents are paged via the tool's `offset`.
+  ELO_MAX_TEXT_CHARS: z.coerce.number().int().positive().max(500_000).default(50_000),
+  // Reverse proxies typically cut a request at 60 s; a longer timeout here just
+  // turns into a 504 the client cannot interpret. Raise both together.
+  ELO_DOWNLOAD_TIMEOUT_MS: z.coerce.number().int().positive().default(60_000),
+  // Download + parse holds the whole file in memory. Three concurrent 15 MB
+  // PDFs will OOM a small container, and the HTTP transport has no backpressure
+  // of its own.
+  ELO_CONTENT_CONCURRENCY: z.coerce.number().int().positive().max(8).default(2),
+  // NOTE: not z.coerce.boolean() — that turns the string "false" into true.
+  ELO_DOCUMENT_CONTENT_ENABLED: z
+    .enum(['true', 'false'])
+    .default('true')
+    .transform((v) => v === 'true'),
 
   // Transport: `stdio` for local Claude Desktop subprocess usage; `http` for
   // remote hosting (Easypanel, etc.). HTTP mode requires MCP_SHARED_SECRET.
