@@ -48,8 +48,11 @@
     "test:live": "tsx scripts/test-live.ts",
     "test:http": "npm run build && tsx scripts/test-http.ts",
     "probe": "tsx scripts/probe-ix.ts",
+    "probe:runas": "tsx scripts/probe-ix.ts --runas",
     "inspect": "npx @modelcontextprotocol/inspector node dist/index.js",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "probe:accounts": "tsx scripts/probe-ix.ts --accounts",
+    "probe:variants": "tsx scripts/probe-ix.ts --variants"
   },
   "engines": {
     "node": ">=22"

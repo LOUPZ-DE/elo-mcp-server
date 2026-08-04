@@ -545,6 +545,109 @@ contract. Anything you did not ask for may come back empty rather than absent.
 
 ---
 
+## 19. `checkoutUser` — the parameter is `id`, and `bset: '-1'` is refused
+
+Two deviations from the conventions the rest of this codebase relies on, in one
+call:
+
+```jsonc
+// wrong — both parts
+{ "userId": "Some User", "checkoutUsersZ": { "bset": "-1" }, "lockZ": { "bset": "0" } }
+// right
+{ "id":     "Some User", "checkoutUsersZ": { "bset": "1"  }, "lockZ": { "bset": "0" } }
+```
+
+The parameter is **`id`**, not `userId` — and it accepts a user name, a numeric
+id or a GUID. Passing `userId` yields `[ELOIX:2000] Falscher Parameter:
+ctrl=<invalid>`, which names neither the parameter you got wrong nor the one it
+wanted.
+
+More surprising: `checkoutUsersZ` **rejects `bset: '-1'`**. Everywhere else in
+this codebase `-1` means "all members" (`SORD_Z_ALL`, `EDIT_INFO_Z_ALL`), and
+that convention does not carry over to `CheckoutUsersC`. `'1'` works.
+
+**Lesson.** The `bset: '<stringified int>'` *shape* is universal (BUGFIXES #5/#6);
+the *value* `-1` is not. When a `…Z` selector is refused, try small values
+before assuming the request body is wrong.
+
+---
+
+## 20. `UserInfo.flags` holds only *directly assigned* rights, not effective ones
+
+The admin console shows user rights in two columns — left for rights assigned
+directly on the user, right for rights inherited from group membership. A user
+can therefore show "main administrator" as ticked in the UI while
+`checkoutUser` reports `flags: 0`.
+
+That is not a reporting bug: ELO 23 documents `AccessC.FLAGS_NOT_TO_INHERIT` —
+"Rights (`UserInfo.flags`) which are not inherited from groups the user is a
+member" — so some rights genuinely do not take effect through a group.
+
+**Consequences for anything reading rights over the API:**
+
+- `flags` alone does not tell you what a user may do. To get effective rights
+  you must also resolve every group in `groupList` and combine, minding the
+  non-inheritable set.
+- `groupList` contains **numeric ids**, not objects — resolve them against
+  `getUserNames`, which returns `{id, name, guid, type, flags, flags2}` with
+  `type: 1` for users and `type: 0` for groups.
+
+**Practical decoding trick.** The constants' numeric values are not in the
+OpenAPI document — only their names. You can still identify a bit empirically by
+comparing accounts whose purpose is known from their name: an administrators
+group has the admin bit, a read-only group does not, and the bit that appears in
+exactly one of them is the one you were looking for.
+
+---
+
+## 21. Impersonation (`runAsUser` / `reportAsUser`) — present in the API, refused at runtime
+
+`IXServicePortIF/login` accepts a `runAsUser` parameter and
+`IXServicePortIF/loginAdmin` accepts `reportAsUser`. Both are in the instance's
+own OpenAPI document. Neither carries a description.
+
+On the instance tested, **both are refused** with `[ELOIX:3008] Unbekannter
+Benutzer, falsches Passwort oder Konto gesperrt` — the same generic error ELO
+returns for a wrong password. Systematically:
+
+| Call | Result |
+|---|---|
+| `login` without `runAsUser` | succeeds |
+| `loginAdmin` without `reportAsUser` | succeeds |
+| `login` **with** `runAsUser` | `[ELOIX:3008]` |
+| `loginAdmin` **with** `reportAsUser` | `[ELOIX:3008]` |
+
+Ruled out by testing: wrong target identifier (user name, numeric id, GUID,
+e-mail, `DOMAIN\account` and the caller's own name all fail identically);
+non-existent target (verified readable via `checkoutUser`); missing
+`FLAG_ADMIN` (assigned **directly**, `flags: 1`, not merely inherited — see #20);
+credentials (both plain logins succeed on the same request path).
+
+**The decisive diagnostic is self-impersonation.** Setting `runAsUser` to the
+*caller's own* name isolates "the mechanism is unavailable" from "the identifier
+is wrong", because running as yourself cannot be an authorisation problem. IX
+collapses both onto 3008, so without this step the failure is not actionable.
+
+Unresolved at the time of writing — pending an answer from ELO on whether this
+needs an additional user right, an Indexserver setting or a licence option.
+`scripts/probe-ix.ts` carries three modes (`--runas`, `--accounts`,
+`--variants`) that re-run the whole matrix in one command once that is known.
+
+**Lesson.** A parameter's presence in the API surface says nothing about whether
+the deployment permits it, and ELO's login errors do not distinguish "not
+allowed" from "not found". Probe the self-referential case to tell them apart.
+
+---
+
+## 22. `getSessionInfos` returns *all* sessions, not the caller's own
+
+It answers "who is connected to this server", not "who am I". The result is an
+array of every active IX session, so it cannot be used to confirm which identity
+a session is running under — which is exactly what one wants when verifying
+impersonation. Use the `user` object in the **login response** instead.
+
+---
+
 ## Summary of ELO IX gotchas
 
 | Aspect | What we observed |
@@ -564,6 +667,11 @@ contract. Anything you did not ask for may come back empty rather than absent.
 | Search handles | `findFirstSords` returns a `searchId` that must be released with `findClose: { searchId }`, or slots leak for the life of the session. |
 | Limit vs. filter | IX applies `max` before you apply any client-side filter — over-fetch or the filter can silently empty the result. |
 | Content URLs | `fileData.stream.url` is relative to `<base>/rest/`, not to the origin or the app path. `docs[0].url` is absolute on an internal hostname. |
+| User lookup | `checkoutUser` takes **`id`** (name, id or GUID), and `checkoutUsersZ` refuses `bset: '-1'` — use `'1'`. |
+| User rights | `UserInfo.flags` = **directly assigned** rights only. Group-inherited rights are not in it, and `AccessC.FLAGS_NOT_TO_INHERIT` means some never inherit at all. `groupList` holds numeric ids. |
+| Impersonation | `login`/`runAsUser` and `loginAdmin`/`reportAsUser` exist in the API but may be refused at runtime with the generic `[ELOIX:3008]`. Probe self-impersonation to separate "not permitted" from "unknown user". |
+| Session identity | `getSessionInfos` lists **all** server sessions, not yours. Read the identity from the login response. |
+| Login errors | `[ELOIX:3008]` covers unknown user, wrong password, locked account **and** refused impersonation. It is not a diagnosis. |
 
 ---
 

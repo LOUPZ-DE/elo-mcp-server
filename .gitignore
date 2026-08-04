@@ -14,3 +14,8 @@ coverage/
 
 # Local session-handoff notes — never publish to the public repo
 context.md
+
+# Personal knowledge notes about the live ELO installation. Contain internal
+# hostnames, licence details and account names — the anonymised technical
+# findings belong in BUGFIXES.md instead.
+ELO-Erkenntnisse.md
