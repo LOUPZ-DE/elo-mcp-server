@@ -52,6 +52,48 @@ Notion AI should call `elo_search` and list the hits. If it does not: check
 Notion's activity log for whether the connector is invoked at all, and the
 MCP server logs in Easypanel to see whether a request arrived.
 
+A better first test, because it exercises the intended workflow end to end:
+
+> Which monthly reports are filed in project &lt;your project number&gt;, and what
+> does the most recent one say?
+
+That should produce `elo_find_project_folder` → `elo_list_folder` →
+`elo_get_document_content`, with links carrying the project path.
+
+## What this connector does and does not do
+
+Worth setting out before a pilot, because two expectations come up every time.
+
+**Document text, not document files.** `elo_get_document_content` returns the
+extracted *text* of a PDF or Word file. Notion consumes text from tool results;
+there is no mechanism by which an MCP tool result becomes a file attachment or
+a Notion file block. A literal 1:1 import of the original PDF/DOCX into Notion
+requires Notion's file-upload API driven by an ETL job — that is Path C below,
+not Path A. Ask for "summarise / extract / quote from this document" rather
+than "import this document".
+
+**Scanned documents cannot be read.** A PDF that is a photograph of paper has
+no text layer. The tool detects this and says so (`textLayer: "none"`) instead
+of returning empty text; open the `eloLink` to view it. No OCR is performed.
+
+**The connector is bound to whatever you attached it to.** Notion scopes custom
+connectors per agent — an assistant that does not have the ELO connector
+attached cannot reach ELO, even in a workspace where the connector exists, and
+it cannot open ELO links on your behalf either. If a prompt yields "ELO is not
+reachable in this chat", the fix is to address the agent that holds the
+connector, e.g.:
+
+> @ELO MCP Connector (BETA) — use this agent to fetch the information from ELO.
+
+This is a Notion product boundary, not a server-side limitation.
+
+**Links open the ELO client, not a browser view.** With
+`ELO_WEBCLIENT_URL=https://elo-link.loupz.de`, an `eloLink` redirects to
+`elodms://<objId>`, a protocol handler that opens the installed ELO desktop
+client. For recipients without it, the link does nothing. If your installation
+has a browser-accessible web client, point `ELO_WEBCLIENT_URL` at it instead —
+every tool builds its links from that one value.
+
 ### OAuth requirement
 
 If Notion does **not** accept a Bearer token and insists on the OAuth 2.0
@@ -106,16 +148,38 @@ database.
      ```
 2. **Function node** parses `result.content[0].text` (a JSON string with the
    tool output).
+
+   > **Changed in 0.2.0:** tool results are envelope objects, not bare arrays.
+   > The hits live under `.results`, alongside `truncated`, `note` and — for
+   > searches — `scope` and `engine`. Update any existing mapping from
+   > `parsed.map(…)` to `parsed.results.map(…)`.
+
 3. **Notion node** (with a Notion Integration Token):
    - Operation: "Create Database Page"
    - Database ID: the target database
-   - Properties: name, objId, mask, last-changed, link (all from the MCP
-     output).
+   - Properties: name, objId, path, mask, last-changed, link — take the link
+     from `eloLink` verbatim rather than assembling it.
+
+### This is the path for actual file import
+
+Path C is the only route that can put the original PDF or Word file into Notion
+as a file, because it can call Notion's file-upload API — which an MCP tool
+result cannot reach. Sketch:
+
+1. `elo_search` / `elo_list_folder` → the objIds you want.
+2. `elo_get_document_link` → `downloadUrl`. Note it is session-bound and expires
+   within minutes, so n8n must fetch it immediately and with the same
+   credentials; it is not a URL you can hand to Notion.
+3. n8n downloads the bytes, then uploads them to Notion.
+
+If you only need the *content* (summaries, quotes, extracted figures), skip all
+of this and use `elo_get_document_content` from Path A.
 
 ### Trade-offs
 
 - ✅ Works with any Notion plan (including Free), because it uses the
   standard Notion API with an Integration Token.
+- ✅ The only path that can attach real files.
 - ✅ Full audit trail via n8n logs.
 - ❌ Data is a **copy**, not live. Changes in ELO appear only after the
   next n8n run.

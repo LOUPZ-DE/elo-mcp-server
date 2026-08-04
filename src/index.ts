@@ -17,6 +17,12 @@ import {
   eloFindProjectFolder,
   FindProjectFolderInputSchema,
 } from './tools/elo_find_project_folder.js';
+import { eloListFolder, ListFolderInputSchema } from './tools/elo_list_folder.js';
+import {
+  eloGetDocumentContent,
+  GetDocumentContentInputSchema,
+} from './tools/elo_get_document_content.js';
+import { createSemaphore } from './utils/semaphore.js';
 
 let cfg: ReturnType<typeof loadConfig>;
 try {
@@ -40,9 +46,34 @@ const eloClient = new EloClient({
 });
 
 const linkOptions = { webclientBaseUrl: cfg.ELO_WEBCLIENT_URL };
+
 const projectFolderOptions = {
   webclientBaseUrl: cfg.ELO_WEBCLIENT_URL,
   projectNumberField: cfg.ELO_PROJECT_NUMBER_FIELD,
+  projectNameField: cfg.ELO_PROJECT_NAME_FIELD,
+  projectMarkerField: cfg.ELO_PROJECT_MARKER_FIELD,
+  projectMarkerValue: cfg.ELO_PROJECT_MARKER_VALUE,
+};
+
+const contentOptions = {
+  webclientBaseUrl: cfg.ELO_WEBCLIENT_URL,
+  maxBytes: cfg.ELO_MAX_DOCUMENT_BYTES,
+  maxChars: cfg.ELO_MAX_TEXT_CHARS,
+  timeoutMs: cfg.ELO_DOWNLOAD_TIMEOUT_MS,
+};
+
+/** Serialises document downloads so parallel large files cannot exhaust memory. */
+const withContentSlot = createSemaphore(cfg.ELO_CONTENT_CONCURRENCY);
+
+// Surfaced on every search/listing hit. Without these the model cannot tell
+// two similarly named documents from different projects apart.
+const listingOptions = {
+  webclientBaseUrl: cfg.ELO_WEBCLIENT_URL,
+  projectIndexFields: [
+    cfg.ELO_PROJECT_NUMBER_FIELD,
+    cfg.ELO_PROJECT_NAME_FIELD,
+    cfg.ELO_PROJECT_MARKER_FIELD,
+  ],
 };
 
 function asTextResult(payload: unknown) {
@@ -90,57 +121,56 @@ function summarizeRpc(body: unknown): {
 // may only be bound to one transport at a time, so each request gets its own
 // server + transport — otherwise a long-lived GET SSE stream (e.g. Notion's)
 // keeps the singleton bound and a concurrent POST throws "Already connected".
+// One global rule beats repeating link policy in five tool descriptions: the
+// pilot's "sometimes the right ELO link, sometimes a link into a different
+// project" came from the model filling gaps from conversation context.
+const SERVER_INSTRUCTIONS = `This server exposes a read-only view of the ELO document archive.
+
+Link policy — this is not optional:
+- Every ELO link you output must be copied VERBATIM from the \`eloLink\` field of a tool result.
+- Never construct, guess, shorten or complete an ELO URL yourself, and never reuse a link seen earlier in the conversation or coming from another system for a different object.
+- If you need a link you do not have, call elo_get_document_link. If that fails, say the link is unavailable.
+
+Identifying the right object:
+- Documents in different projects often have near-identical names. Always check the \`path\` field before attributing a hit to a project, and state the path when you cite a document.
+- For any project-specific question, resolve the project first with elo_find_project_folder, then pass its objId as \`parentId\` to elo_search or as \`folderId\` to elo_list_folder. Do not answer a project question from an archive-wide search.
+- When several projects match and none is an exact match, ask the user which one is meant rather than choosing.
+
+Completeness:
+- Results carry \`truncated\` and a \`note\`. When \`truncated\` is true the list is incomplete — never present it as exhaustive, and never call the first entry "the latest" or "the only" one.`;
+
 function createServer(): McpServer {
-  const server = new McpServer({
-    name: 'elo-mcp-server',
-    version: '0.1.0',
-  });
+  const server = new McpServer(
+    {
+      name: 'elo-mcp-server',
+      version: '0.3.0',
+    },
+    { instructions: SERVER_INSTRUCTIONS },
+  );
+
+  /** Every tool here reads; none of them writes. */
+  const readOnly = {
+    readOnlyHint: true,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: true,
+  } as const;
 
   server.registerTool(
     'elo_search',
     {
-      title: 'ELO full-text search',
+      title: 'ELO search',
       description:
-        'Searches ELO for documents and folders by free-text query, project number, or keyword. Returns id, name, type (document/folder), mask name, owner, last-changed date.',
+        'Searches the ELO archive for documents and folders. Every hit carries its archive `path` and a ready-made `eloLink` — use both verbatim.\n\n' +
+        'Archive-wide by default, which means hits from unrelated projects look identical apart from their `path`. For project-specific questions, first call elo_find_project_folder and pass its objId as `parentId`; that restricts the search to the project subtree.\n\n' +
+        'Note the trade-off: ELO cannot combine full-text search with a folder restriction. Without `parentId` the search covers document *content*; with `parentId` it covers titles and index fields only. The response states which engine ran.\n\n' +
+        'Check `truncated` before treating the result as complete.',
       inputSchema: SearchInputSchema,
+      annotations: readOnly,
     },
     async (args) => {
       try {
-        return asTextResult(await eloSearch(eloClient, args));
-      } catch (err) {
-        return asError(err);
-      }
-    },
-  );
-
-  server.registerTool(
-    'elo_get_metadata',
-    {
-      title: 'Get ELO object metadata',
-      description:
-        'Returns index fields, owner, mask, version info for a given ELO objId. Works for both folders and documents.',
-      inputSchema: GetMetadataInputSchema,
-    },
-    async (args) => {
-      try {
-        return asTextResult(await eloGetMetadata(eloClient, args));
-      } catch (err) {
-        return asError(err);
-      }
-    },
-  );
-
-  server.registerTool(
-    'elo_get_document_link',
-    {
-      title: 'Get ELO document links',
-      description:
-        'Returns a stable ELO webclient link and (when available) a short-lived download URL for a document. Download URLs are valid for ~1–10 minutes only.',
-      inputSchema: GetDocumentLinkInputSchema,
-    },
-    async (args) => {
-      try {
-        return asTextResult(await eloGetDocumentLink(eloClient, args, linkOptions));
+        return asTextResult(await eloSearch(eloClient, args, listingOptions));
       } catch (err) {
         return asError(err);
       }
@@ -152,12 +182,99 @@ function createServer(): McpServer {
     {
       title: 'Find ELO project folder',
       description:
-        'Finds project folders by project number or project name. Filters results to folders only and reconstructs their archive path.',
+        'Resolves a project to its ELO data-room folder. Start here for any project-specific question, then use the returned objId as `parentId` (elo_search) or `folderId` (elo_list_folder).\n\n' +
+        'Prefer `projectNumber` — it is matched exactly against the project index field. `matchType: "exact"` is authoritative; when an exact hit exists, ignore fuzzy ones entirely. A project number and a folder *title* containing that number frequently point at different folders.\n\n' +
+        '`isProjectRoot: false` means the folder is a sub-folder or a non-project folder, not the project data room. If several candidates remain, ask the user which project is meant instead of picking one.',
       inputSchema: FindProjectFolderInputSchema,
+      annotations: readOnly,
     },
     async (args) => {
       try {
         return asTextResult(await eloFindProjectFolder(eloClient, args, projectFolderOptions));
+      } catch (err) {
+        return asError(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    'elo_list_folder',
+    {
+      title: 'List ELO folder contents',
+      description:
+        'Lists what is inside a folder. This is the right tool for "which monthly reports / invoices / documents exist in project X" — get `folderId` from elo_find_project_folder first.\n\n' +
+        '`depth: 1` (default) returns direct children only; raise it to descend into sub-folders. `nameFilter` matches substrings of the entry name. Sorting by `changed` or `created` puts the newest first.\n\n' +
+        'When `truncated` is true, the sort applied only to the entries that were fetched, so the first entry is not necessarily the newest overall.',
+      inputSchema: ListFolderInputSchema,
+      annotations: readOnly,
+    },
+    async (args) => {
+      try {
+        return asTextResult(await eloListFolder(eloClient, args, listingOptions));
+      } catch (err) {
+        return asError(err);
+      }
+    },
+  );
+
+  if (cfg.ELO_DOCUMENT_CONTENT_ENABLED) {
+    server.registerTool(
+      'elo_get_document_content',
+      {
+        title: 'Read ELO document text',
+        description:
+          'Returns the extracted text of a document — this is how you read what is actually inside a PDF, Word file or text file in ELO. Use it whenever a question is about document *content* rather than about which documents exist.\n\n' +
+          `Long documents are truncated at around ${cfg.ELO_MAX_TEXT_CHARS.toLocaleString('en-US')} characters; when \`truncated\` is true, call again with \`offset\` set to the returned \`nextOffset\` to read on.\n\n` +
+          'Scanned PDFs have no text layer and return empty text with `textLayer: "none"` — say so rather than guessing at the content. Spreadsheets, presentations, e-mail containers (.ecf/.msg) and images are not readable; the response explains why and gives you the eloLink to pass to the user.\n\n' +
+          'When a clickable link is all that is needed, use elo_get_document_link instead — it is far cheaper.',
+        inputSchema: GetDocumentContentInputSchema,
+        annotations: readOnly,
+      },
+      async (args) => {
+        try {
+          return asTextResult(
+            await withContentSlot(() => eloGetDocumentContent(eloClient, args, contentOptions)),
+          );
+        } catch (err) {
+          return asError(err);
+        }
+      },
+    );
+  }
+
+  server.registerTool(
+    'elo_get_metadata',
+    {
+      title: 'Get ELO object metadata',
+      description:
+        'Returns all index fields, mask, owner, dates and version info for an objId. Works for folders and documents.\n\n' +
+        'Also returns `path` and `eloLink`, so this is a cheap way to verify which project an object belongs to before citing it. Returns metadata only — for the document text use elo_get_document_content.',
+      inputSchema: GetMetadataInputSchema,
+      annotations: readOnly,
+    },
+    async (args) => {
+      try {
+        return asTextResult(await eloGetMetadata(eloClient, args, linkOptions));
+      } catch (err) {
+        return asError(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    'elo_get_document_link',
+    {
+      title: 'Get ELO document link',
+      description:
+        'The authoritative source of a link to an ELO object. Returns `eloLink` (stable, hand this to users) plus the containing `path`.\n\n' +
+        'Never build an ELO URL yourself — always take `eloLink` from here or from a search result.\n\n' +
+        'The `downloadUrl` it may also return is server-session-bound and expires within minutes; external clients cannot open it. To read a document, call elo_get_document_content instead.',
+      inputSchema: GetDocumentLinkInputSchema,
+      annotations: readOnly,
+    },
+    async (args) => {
+      try {
+        return asTextResult(await eloGetDocumentLink(eloClient, args, linkOptions));
       } catch (err) {
         return asError(err);
       }

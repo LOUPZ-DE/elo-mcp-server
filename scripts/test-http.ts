@@ -161,7 +161,7 @@ async function main(): Promise<void> {
   );
 
   await check(
-    'POST /mcp tools/list returns the four ELO tools',
+    'POST /mcp tools/list returns all ELO tools',
     () => jsonRpc('tools/list', {}, 2),
     (r, body) => {
       if (r.status !== 200) return `status=${r.status}`;
@@ -172,9 +172,47 @@ async function main(): Promise<void> {
         'elo_get_metadata',
         'elo_get_document_link',
         'elo_find_project_folder',
+        'elo_list_folder',
+        'elo_get_document_content',
       ];
       const missing = needed.filter((n) => !body.includes(n));
       return missing.length === 0 || `missing tools: ${missing.join(', ')}`;
+    },
+  );
+
+  // The link policy lives in prose — in the server instructions and the tool
+  // descriptions. That prose is the actual fix for "sometimes the wrong ELO
+  // link", so it gets a regression test like any other behaviour.
+  await check(
+    'initialize carries the verbatim-link instructions',
+    () =>
+      jsonRpc(
+        'initialize',
+        { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'test-http', version: '0.0.0' } },
+        11,
+      ),
+    (r, body) => {
+      if (r.status !== 200) return `status=${r.status}`;
+      if (!body.includes('instructions')) return 'no instructions field';
+      if (!body.includes('VERBATIM')) return 'instructions do not demand verbatim links';
+      return true;
+    },
+  );
+
+  await check(
+    'tool descriptions steer scoping and forbid link construction',
+    () => jsonRpc('tools/list', {}, 12),
+    (r, body) => {
+      if (r.status !== 200) return `status=${r.status}`;
+      const required: Array<[string, string]> = [
+        ['eloLink', 'descriptions never mention eloLink'],
+        ['parentId', 'elo_search does not expose parentId'],
+        ['folderId', 'elo_list_folder does not expose folderId'],
+        ['Never build an ELO URL yourself', 'link tool does not forbid URL construction'],
+        ['authoritative', 'exact-match guidance missing'],
+      ];
+      const missing = required.filter(([needle]) => !body.includes(needle));
+      return missing.length === 0 || missing.map(([, msg]) => msg).join('; ');
     },
   );
 

@@ -16,10 +16,32 @@ Custom Connectors, Notion AI, Open WebUI, n8n, Make, …) can call.
 
 | Tool | Purpose |
 |---|---|
-| `elo_search` | Full-text and index-field search across documents and folders |
-| `elo_get_metadata` | Returns index fields, mask, owner, and version info for a given `objId` |
-| `elo_get_document_link` | Builds a web-client link and (when available) a short-lived download URL |
-| `elo_find_project_folder` | Resolves a project folder by project number or name |
+| `elo_find_project_folder` | Resolves a project to its data-room folder — exact match on the project number, fuzzy fallback, clearly labelled |
+| `elo_search` | Search across documents and folders, archive-wide or scoped to a project subtree |
+| `elo_list_folder` | Lists folder contents with depth, name filter, sorting and paging |
+| `elo_get_document_content` | Extracts the text of a PDF, Word or plain-text document |
+| `elo_get_metadata` | Index fields, mask, owner, dates and version info for an `objId` |
+| `elo_get_document_link` | The authoritative link to an ELO object |
+
+Every result carries the object's archive `path` and a ready-made `eloLink`.
+That is deliberate: an assistant given only an `objId` has to reconstruct both,
+and it will do so inconsistently — hits from different projects are otherwise
+indistinguishable. The server's MCP `instructions` require links to be copied
+verbatim from tool output.
+
+### Two search engines, one trade-off worth knowing
+
+ELO cannot combine full-text search with a folder restriction — the full-text
+index runs on a separate engine that ignores folder criteria (see
+[`BUGFIXES.md`](BUGFIXES.md) #16). So:
+
+- **Without `parentId`** — `elo_search` searches document *content* across the
+  whole archive.
+- **With `parentId`** — it searches titles and index fields within that
+  subtree only.
+
+The response states which engine ran and says so in its `note`, rather than
+implying a scope that was not applied.
 
 ## Quick start
 
@@ -48,7 +70,11 @@ See [`.env.example`](.env.example) for the complete list with comments.
 | `ELO_WEBCLIENT_URL` | Browser-facing URL prefix used for human-clickable links |
 | `ELO_USERNAME` / `ELO_PASSWORD` | Technical user, read-only role recommended |
 | `ELO_BASIC_AUTH_USER` / `ELO_BASIC_AUTH_PASS` | Optional, only if a reverse proxy in front of IX requires HTTP Basic Auth |
-| `ELO_PROJECT_NUMBER_FIELD` | Index-field name that holds the project number. Default `PRJ_NO` |
+| `ELO_PROJECT_NUMBER_FIELD` / `ELO_PROJECT_NAME_FIELD` | Index fields holding the project number and name. Defaults `PRJ_NO` / `PRJ_NAME` |
+| `ELO_PROJECT_MARKER_FIELD` / `ELO_PROJECT_MARKER_VALUE` | How a project data room is recognised. Defaults `SOL_TYPE` / `PROJEKT` |
+| `ELO_DOCUMENT_CONTENT_ENABLED` | Set to `false` to unregister `elo_get_document_content`. Default `true` |
+| `ELO_MAX_DOCUMENT_BYTES` / `ELO_MAX_TEXT_CHARS` | Download and extracted-text caps. Defaults 15 MB / 50 000 characters |
+| `ELO_DOWNLOAD_TIMEOUT_MS` / `ELO_CONTENT_CONCURRENCY` | Download timeout and parallelism. Defaults 60 s / 2 |
 | `ELO_LANGUAGE` / `ELO_COUNTRY` / `ELO_TIMEZONE` | ClientInfo defaults |
 | `MCP_TRANSPORT` | `stdio` (default) or `http` |
 | `MCP_HTTP_HOST` / `MCP_HTTP_PORT` | HTTP transport bind address (default `0.0.0.0:3000`) |
@@ -62,16 +88,32 @@ npm run build
 npm run inspect
 ```
 
-This opens a browser UI listing every registered tool. Suggested smoke flow:
+This opens a browser UI listing every registered tool. Suggested smoke flow —
+it mirrors the workflow the tool descriptions steer the model towards:
 
-1. `elo_search` with a query you expect hits for → results with correct
-   `type: 'document' | 'folder'` classification.
-2. Pick an `objId` from the result and call `elo_get_metadata` → `indexFields`
-   must be populated.
-3. For a document `objId`, call `elo_get_document_link` → open `eloLink` in the
-   browser; should land on the right document.
-4. `elo_find_project_folder` with a real project number → matching folder with
-   reconstructed `path`.
+1. `elo_find_project_folder` with a real project number → `matchMode: "exact"`,
+   one folder with `isProjectRoot: true` and a reconstructed `path`.
+2. `elo_list_folder` with that `objId` → the project's sub-folders.
+3. `elo_search` with `parentId` set to the same `objId` → every hit's `path`
+   starts inside the project.
+4. `elo_get_document_content` on a PDF or `.docx` from that list → extracted
+   text, with `truncated`/`nextOffset` on longer documents.
+5. `elo_get_document_link` on the same `objId` → an `eloLink` byte-identical to
+   the one the search returned.
+
+### Automated tests
+
+```powershell
+npm run test:unit    # offline; link building, paths, ranking, URL resolution, extraction
+npm run test:http    # spawns the HTTP transport; auth, tools/list, SSE regression
+npm run test:live    # end-to-end against your real ELO instance (read-only)
+npm run probe        # read-only reconnaissance of IX runtime behaviour
+```
+
+`test:live` discovers its own fixtures — it finds a project, lists it, searches
+within it and reads a document. Steps 3–5 above are its core assertions: a
+scoped search must not leak documents from other projects, and one object must
+produce one link no matter which tool returned it.
 
 ## Claude Desktop integration
 
@@ -159,10 +201,22 @@ containing the MCP message.
   review.
 - **Credentials never leave the process.** `.env` is git-ignored; logs are
   configured with pino redaction for `userPwd`, `Cookie`, `Authorization`.
-- **Download URLs expire.** `elo_get_document_link` returns a `downloadUrl`
-  that ELO IX validates for 1–10 minutes only. Do not persist or pass it to
-  systems that store it long-term — use the `eloLink` for durable
-  references.
+- **Download URLs are not shareable.** The `downloadUrl` from
+  `elo_get_document_link` is bound to the server's ELO session and expires
+  within minutes, so no browser, Notion page or downstream system can open it.
+  To read a document use `elo_get_document_content`; to point a human at one
+  use `eloLink`.
+- **Text extraction, not file transfer.** `elo_get_document_content` returns
+  extracted *text*. There is no path from an MCP tool result to a file
+  attachment in a downstream tool — a literal 1:1 file import needs that
+  system's own upload API driven by an ETL job.
+- **Scanned PDFs return no text.** They are detected and reported with
+  `textLayer: "none"` plus an explanatory `notice`. No OCR is performed; if
+  ELO's own Textreader OCR is enabled, its full-text index is the right source
+  and would be a separate integration.
+- **Node ≥ 22 is required.** The PDF parser (`unpdf`) uses
+  `Promise.withResolvers`, which does not exist on Node 20 — that combination
+  builds cleanly and then fails at runtime.
 - **Session refresh is automatic.** The client re-authenticates after 8
   minutes of idle time and once on `INVALID_SESSION [2001]`.
 - **Folder/document classification** uses the ELO IX convention
@@ -181,6 +235,13 @@ talking to ELO IX REST — and how they were resolved — see
 - Per-client tokens with rotation, replacing the single shared secret.
 - Optional OAuth flow for clients that require it (Notion Custom Connectors,
   claude.ai).
+- Spreadsheet (`.xlsx`) and legacy `.doc` extraction. Deferred: the npm `xlsx`
+  package is frozen with known CVEs and the maintained build lives outside npm,
+  which is a poor fit for a public repository. `exceljs` is the likely route.
+- Optional signed download proxy, so a document could be fetched by a browser
+  or a downstream system without an ELO session. Deliberately not built —
+  it would expose archive documents on a URL that anyone holding the link can
+  open, which is a decision for the archive owner rather than a default.
 
 ## API references
 

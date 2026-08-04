@@ -400,6 +400,151 @@ is invisible.
 
 ---
 
+## 14. `max` applied before the folder filter dropped real project folders
+
+**Symptom.** Pilot users reported links into the wrong project data room — a
+`BIG` sub-folder inside the ETZ project offered in place of the project itself.
+
+**Cause.** Two defects three lines apart in `elo_find_project_folder`:
+
+```ts
+max: 50,                                                        // IX applies this
+const folders = (…sords ?? []).filter((s) => isFolder(s.type));  // we apply this, after
+```
+
+IX truncates to `max` first. If the top 50 fuzzy hits happened to be documents,
+the project folder was **silently absent** and the model got a plausible-looking
+partial list. Separately, `SOL_TYPE === "PROJEKT"` — documented in #12 and
+present on every project mask — was never read, so a sub-folder whose title
+matched came back with the same shape, the same `eloLink` and the same authority
+as the real data room. No score, no ordering, no `matchType`.
+
+**Evidence from a live archive** (identifiers anonymised). Folder titles and
+project-number index fields drift apart over a project's life, so they really do
+disagree: project number `10002` is carried by folder `500001`, whose *title*
+begins `10001 / …` and which is marked `SOL_TYPE=PROJEKT`. Meanwhile a title
+search for `10002` surfaces a different folder `500002` (`10002 / …`), marked
+`SOL_TYPE=AKQUISE`. Exact and fuzzy lookup point at different objects, and only
+the index field is authoritative.
+
+**Fix.** Two-stage lookup: exact `findByIndex` on the project-number field
+first, fuzzy eSearch only as a fallback and with `max: 200`; label every hit
+`exact` or `fuzzy`; rank `exact+root > exact > root > fuzzy`; drop non-root
+folders once any root was found.
+
+**Lesson.** When a server applies a limit before you apply a filter, the limit
+is not a limit — it is a silent data loss. Filter server-side, or over-fetch
+enough that the filter cannot empty the window.
+
+---
+
+## 15. The change date is `XDateIso`, not `xDateIso`
+
+`EloSord` declared `xDateIso` and both `elo_search` and `elo_get_metadata` read
+it. IX spells the field with a **capital X** (`IDateIso` / `XDateIso`), so every
+result carried `xDateIso: undefined` and nobody noticed, because `undefined`
+fields simply vanish from the JSON.
+
+Read both spellings: `sord.XDateIso ?? sord.xDateIso`.
+
+**Lesson.** A silently absent optional field looks exactly like a field that was
+legitimately empty. Dump the raw key list once (`Object.keys(sord)`) rather than
+trusting hand-written typings — that is what `scripts/probe-ix.ts` is for.
+
+---
+
+## 16. `findByESearch` cannot be restricted to a folder
+
+Scoping a search to a project is the single most useful precision lever, and
+ELO does not offer it on the full-text engine. Four mechanisms were probed
+against the live instance; **all four were accepted without error and silently
+ignored**, returning hits from unrelated folders:
+
+- `findInfo.findChildren` alongside `findByESearch`
+- `searchParams.parentId`
+- `searchOptions.parentId`
+- `searchParams.pathId`
+
+`findByESearch` runs on the separate iSearch engine, which has no notion of the
+database find criteria.
+
+What *does* work is the database engine: `findChildren` **combines with**
+`findByIndex` (AND, scope holds), so a scoped title/index search is possible —
+just not a scoped full-text search.
+
+```jsonc
+{ "findChildren": { "parentId": "500001", "endLevel": 3 },
+  "findByIndex":  { "name": "*Rechnung*" } }
+```
+
+`endLevel` is a depth: `1` = direct children, `2`/`3` descend further; `0`
+behaves like `1`. There is no `findByParent` — IX rejects it with
+`[ELOIX:2000] Die Suchanfrage ist ungültig`.
+
+**Fix.** `elo_search` switches engines when `parentId` is set, reports which
+engine ran, and states in its `note` that document content was not searched.
+Every hit is additionally verified client-side to be inside the requested
+folder.
+
+**Lesson.** An API accepting a parameter is not evidence that it honours it.
+Verify a filter by checking the *contents* of the result, never the status code
+or the row count.
+
+---
+
+## 17. Content URLs: two shapes, both wrong out of the box
+
+`checkoutDoc` offers two routes to a document's bytes and neither works as
+given:
+
+| Field | Value on the Loupz instance | Problem |
+|---|---|---|
+| `fileData.stream.url` | `getstream?serverid=…&messageid=…&streamid=…` | Bare relative — no leading slash |
+| `docs[0].url` | `http://<internal-host>:9090/ix-INSTANCE/ix?cmd=…&eticket=…` | Internal hostname, unreachable from the container |
+
+The relative one is the trap. It resolves against neither the origin nor the
+application path — both return 404:
+
+```
+https://elo.example.com/getstream?…                  404
+https://elo.example.com/ix-INSTANCE/getstream?…      404
+https://elo.example.com/ix-INSTANCE/rest/getstream?… 200, serves the bytes
+```
+
+It is relative to the **REST endpoint root**, `<ELO_BASE_URL>/rest/`.
+`docs[0].url` works once its path is re-anchored onto the public origin.
+
+There is no inline `fileData.data` on this instance, so a second HTTP request is
+unavoidable.
+
+**Fix.** `src/elo/streamUrl.ts` resolves bare-relative URLs against
+`<base>/rest/`, absolute and origin-relative ones against the origin, and pins
+*every* result to `ELO_BASE_URL`'s origin. That also means no code path can send
+the Basic credentials and session cookie to a foreign host — a security property
+rather than a lucky accident.
+
+**Lesson.** When a URL comes back relative, the base it is relative to is a
+guess until proven. Try the candidates and check for bytes.
+
+---
+
+## 18. `checkoutDoc` without `editInfoZ` returns a stripped-down `sord`
+
+`elo_get_document_link` passed only `docVersionZ` and `lockZ`, because the
+document version was all it seemed to need. IX then returned a `sord` without
+`name`, so the generated link came back as `…/<objId>` instead of
+`…/<objId>?title=…` — the *same object* got two different links depending on
+which tool produced it. This is a concrete source of the "no consistency in the
+links" report.
+
+Always send `editInfoZ: { bset: '-1', sordZ: { bset: '-1' } }` when you intend
+to read anything off the `sord`, even if the sord is not the point of the call.
+
+**Lesson.** Related to #12: the `Z` selectors are not hints, they are the
+contract. Anything you did not ask for may come back empty rather than absent.
+
+---
+
 ## Summary of ELO IX gotchas
 
 | Aspect | What we observed |
@@ -412,7 +557,13 @@ is invisible.
 | Method consistency | OpenAPI schemas and runtime behaviour of similarly-named methods can diverge. `checkoutSord` returns empty `sord` fields here even with the right `bset`; use `checkoutDoc`. |
 | URL spaces | Three separate ones: IX REST API, IX Plugin Proxy (backend-only), web client / link service. |
 | Nested refs | `Sord.refPaths` is `RefPathInfo[]` (with `.path` + `.pathAsString`), not `RefPathItem[][]`. |
-| Nested `Z` selectors | `EditInfoZ` needs a nested `sordZ` to populate `sord.objKeys`. The outer bset alone is not enough. |
+| Nested `Z` selectors | `EditInfoZ` needs a nested `sordZ` to populate `sord.objKeys`. The outer bset alone is not enough. Omitting `editInfoZ` returns a `sord` without even `name`. |
+| Field name casing | `IDateIso` / **`XDateIso`** — capital X. A lowercase read yields `undefined` on every call. |
+| Search engines | `findByESearch` (iSearch, full-text, **cannot be scoped to a folder**) and `findByIndex` + `findChildren` (database, scopable, titles/index only). They do not combine. |
+| Folder listing | `findChildren: { parentId, endLevel }`; `endLevel` is a depth, `0` behaves like `1`. `findByParent` does not exist. |
+| Search handles | `findFirstSords` returns a `searchId` that must be released with `findClose: { searchId }`, or slots leak for the life of the session. |
+| Limit vs. filter | IX applies `max` before you apply any client-side filter — over-fetch or the filter can silently empty the result. |
+| Content URLs | `fileData.stream.url` is relative to `<base>/rest/`, not to the origin or the app path. `docs[0].url` is absolute on an internal hostname. |
 
 ---
 
