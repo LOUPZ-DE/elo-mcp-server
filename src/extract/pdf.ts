@@ -1,4 +1,5 @@
 import { EncryptedDocumentError, ExtractionFailedError } from './types.js';
+import { installSumPrecisePolyfill } from './sumPrecise.js';
 import type { ExtractInput, ExtractResult } from './types.js';
 
 /**
@@ -10,6 +11,10 @@ const CHARS_PER_PAGE_THRESHOLD = 20;
 const SPARSE_THRESHOLD = 80;
 
 export async function extractPdf(input: ExtractInput): Promise<ExtractResult> {
+  // pdf.js calls Math.sumPrecise, which Node 24 does not ship. Must be in place
+  // before the module below is evaluated. No-op once Node provides it.
+  installSumPrecisePolyfill();
+
   // Loaded on demand so stdio startup stays fast and a broken optional parser
   // cannot take the whole server down at import time.
   const { getDocumentProxy, extractText } = await import('unpdf');

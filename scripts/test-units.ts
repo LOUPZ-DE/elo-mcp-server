@@ -19,6 +19,7 @@ import {
 import { rankProjectFolders, type ProjectCandidate } from '../src/tools/elo_find_project_folder.js';
 import { resolveStreamUrl, isForeignHost, UnsafeStreamUrlError } from '../src/elo/streamUrl.js';
 import { extractText, normaliseWhitespace } from '../src/extract/index.js';
+import { sumPrecise, installSumPrecisePolyfill } from '../src/extract/sumPrecise.js';
 import type { EloSord } from '../src/elo/types.js';
 
 let failures = 0;
@@ -442,6 +443,95 @@ test('falls back to windows-1252 for legacy encodings', async () => {
 test('strips a UTF-8 BOM', async () => {
   const r = await extractText({ data: Buffer.from([0xef, 0xbb, 0xbf, 0x68, 0x69]), ext: 'TXT' });
   assert.equal(r.text, 'hi');
+});
+
+// --- Math.sumPrecise polyfill ----------------------------------------------
+//
+// pdf.js (bundled by unpdf 1.8.0) calls Math.sumPrecise, which Node 24 does not
+// provide. Without it, PDFs that reach those code paths fail to extract.
+
+section('sumPrecise');
+
+test('sums integers exactly', () => {
+  assert.equal(sumPrecise([1, 2, 3, 4, 5]), 15);
+});
+
+test('empty iterable gives -0, per the proposal', () => {
+  assert.ok(Object.is(sumPrecise([]), -0));
+});
+
+test('beats naive summation on catastrophic cancellation', () => {
+  // The classic case: the small terms vanish in a naive left-to-right sum.
+  const items = [1e16, 1, 1, 1, -1e16];
+  const naive = items.reduce((a, b) => a + b, 0);
+  assert.equal(sumPrecise(items), 3);
+  assert.notEqual(naive, 3);
+});
+
+test('handles many small fractions without drift', () => {
+  const items = new Array(10_000).fill(0.1);
+  assert.equal(sumPrecise(items), 1000);
+});
+
+test('NaN anywhere wins', () => {
+  assert.ok(Number.isNaN(sumPrecise([1, NaN, 2])));
+});
+
+test('opposing infinities give NaN', () => {
+  assert.ok(Number.isNaN(sumPrecise([Infinity, -Infinity])));
+});
+
+test('a single infinity propagates', () => {
+  assert.equal(sumPrecise([1, Infinity, 2]), Infinity);
+  assert.equal(sumPrecise([1, -Infinity, 2]), -Infinity);
+});
+
+test('all-negative-zero sums to -0', () => {
+  assert.ok(Object.is(sumPrecise([-0, -0]), -0));
+});
+
+test('cancellation to zero gives +0, not -0', () => {
+  assert.ok(Object.is(sumPrecise([1, -1]), 0));
+});
+
+test('accepts any iterable, not just arrays', () => {
+  assert.equal(sumPrecise(new Set([1, 2, 3])), 6);
+  assert.equal(
+    sumPrecise(
+      (function* () {
+        yield 2;
+        yield 4;
+      })(),
+    ),
+    6,
+  );
+});
+
+test('rejects non-numeric values', () => {
+  assert.throws(() => sumPrecise([1, '2' as unknown as number]), TypeError);
+});
+
+test('rejects a non-iterable argument', () => {
+  assert.throws(() => sumPrecise(42 as unknown as number[]), TypeError);
+});
+
+test('installs onto Math and is idempotent', () => {
+  installSumPrecisePolyfill();
+  const fn = (Math as unknown as { sumPrecise?: unknown }).sumPrecise;
+  assert.equal(typeof fn, 'function');
+  installSumPrecisePolyfill();
+  assert.equal((Math as unknown as { sumPrecise?: unknown }).sumPrecise, fn, 'second install must not replace it');
+});
+
+test('the installed function is non-enumerable, like a built-in', () => {
+  installSumPrecisePolyfill();
+  assert.ok(!Object.keys(Math).includes('sumPrecise'));
+});
+
+test('pdf.js usage shape: summing glyph widths works', () => {
+  // _getTextWidth does exactly this: sum widths, then divide by 1000.
+  const widths = [500, 722, 333, 611, 278];
+  assert.equal(sumPrecise(widths) / 1e3, 2.444);
 });
 
 // --- summary ---------------------------------------------------------------

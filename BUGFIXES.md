@@ -648,6 +648,50 @@ impersonation. Use the `user` object in the **login response** instead.
 
 ---
 
+## 23. `Math.sumPrecise is not a function` — pdf.js is ahead of Node
+
+Not an ELO issue, but it breaks document extraction, so it belongs here.
+
+`unpdf@1.8.0` bundles a pdf.js that calls **`Math.sumPrecise`**, a recent TC39
+proposal. **Node 24 does not ship it** — `typeof Math.sumPrecise` is
+`undefined` — so affected PDFs fail with `PDF could not be parsed:
+Math.sumPrecise is not a function`.
+
+The instinct is that the dependency is *too old*. It is the opposite: 1.8.0 is
+the current release and its pdf.js is newer than the runtime.
+
+**Why only some documents fail.** Eight call sites exist in the bundle; five are
+unreachable for a read-only consumer:
+
+| Call site | Reachable when reading? |
+|---|---|
+| Font writing, xref writing, PDF save | no — we never write PDFs |
+| Browser editor / text layer | no — server-side only |
+| **Encrypted PDFs** (AES/SHA key derivation) | **yes** |
+| **XFA forms** (column widths) | **yes** |
+| **Form fields** (glyph text width) | **yes** |
+
+Ordinary reports and invoices touch none of them. A sample of 12 real archive
+PDFs extracted cleanly even with `Math.sumPrecise` deleted, so a passing test
+suite says nothing about whether a given archive contains documents that trip it.
+
+**Fix.** `src/extract/sumPrecise.ts` supplies the function, installed by
+`extractPdf()` before its dynamic `import('unpdf')`. Neumaier compensated
+summation, which is exact for the small integral values pdf.js sums here; the
+proposal's formal correctly-rounded guarantee is approximated, not implemented,
+and that difference cannot reach these callers. `installSumPrecisePolyfill()` is
+a no-op once the runtime provides the function, so it retires itself.
+
+Rejected: downgrading unpdf (loses fixes, and 1.8.0 is the only current
+release) and moving to a Node that has the function (would mean running Current
+rather than LTS in production).
+
+**Lesson.** When a dependency calls something that does not exist, check which
+side is out of step before assuming the package is stale — and remember that a
+green test suite only proves the *sampled* documents avoid the broken path.
+
+---
+
 ## Summary of ELO IX gotchas
 
 | Aspect | What we observed |
