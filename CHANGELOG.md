@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **E-mail extraction (`.eml`, RFC 822 / MIME).** `elo_get_document_content`
+  now reads e-mail files: a From/To/Cc/Subject/Date block followed by the
+  message body, with attachments listed by name and type but not decoded —
+  in ELO they are normally filed as separate documents that can be read
+  individually. Plain-text parts win over HTML; HTML is stripped when it is
+  all that exists. Handles quoted-printable, base64, nested multipart and
+  non-UTF-8 charsets. Hand-rolled MIME walk rather than a mail library:
+  `mailparser`/`postal-mime` bring 200 kB+ and transitive encoding
+  dependencies for a job this narrow. `.eml` is consequently no longer
+  reported as unreadable.
+
+### Fixed
+- **PDFs failing with `Math.sumPrecise is not a function`.** The pdf.js
+  bundled by `unpdf@1.8.0` calls a TC39 proposal that Node 24 does not ship —
+  the dependency is ahead of the runtime, not behind it. `src/extract/sumPrecise.ts`
+  supplies the function before pdf.js is evaluated and becomes a no-op once
+  Node provides it. Affects encrypted PDFs, XFA forms and form-field
+  appearance generation; ordinary documents never reach those code paths.
+  See `BUGFIXES.md` #23.
+
 ## [0.3.0] - 2026-07-31
 
 Document text extraction. Answers the pilot report that the connector found the

@@ -19,7 +19,7 @@ Custom Connectors, Notion AI, Open WebUI, n8n, Make, …) can call.
 | `elo_find_project_folder` | Resolves a project to its data-room folder — exact match on the project number, fuzzy fallback, clearly labelled |
 | `elo_search` | Search across documents and folders, archive-wide or scoped to a project subtree |
 | `elo_list_folder` | Lists folder contents with depth, name filter, sorting and paging |
-| `elo_get_document_content` | Extracts the text of a PDF, Word or plain-text document |
+| `elo_get_document_content` | Extracts the text of a PDF, Word, e-mail (`.eml`) or plain-text document |
 | `elo_get_metadata` | Index fields, mask, owner, dates and version info for an `objId` |
 | `elo_get_document_link` | The authoritative link to an ELO object |
 

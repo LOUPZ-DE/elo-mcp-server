@@ -20,6 +20,7 @@ import { rankProjectFolders, type ProjectCandidate } from '../src/tools/elo_find
 import { resolveStreamUrl, isForeignHost, UnsafeStreamUrlError } from '../src/elo/streamUrl.js';
 import { extractText, normaliseWhitespace } from '../src/extract/index.js';
 import { sumPrecise, installSumPrecisePolyfill } from '../src/extract/sumPrecise.js';
+import { extractEml } from '../src/extract/eml.js';
 import type { EloSord } from '../src/elo/types.js';
 
 let failures = 0;
@@ -443,6 +444,230 @@ test('falls back to windows-1252 for legacy encodings', async () => {
 test('strips a UTF-8 BOM', async () => {
   const r = await extractText({ data: Buffer.from([0xef, 0xbb, 0xbf, 0x68, 0x69]), ext: 'TXT' });
   assert.equal(r.text, 'hi');
+});
+
+// --- EML extraction ---------------------------------------------------------
+//
+// Mail is where encodings actually bite: quoted-printable umlauts, base64
+// bodies, charset labels other than UTF-8, and HTML-only messages.
+
+section('extractEml');
+
+/** Build a message with CRLF line endings, as real mail has. */
+const mail = (...lines: string[]): Buffer => Buffer.from(lines.join('\r\n'), 'latin1');
+
+test('reads a simple plain-text mail with a header block', () => {
+  const r = extractEml({
+    data: mail(
+      'From: Anna Beispiel <anna@example.com>',
+      'To: bob@example.com',
+      'Subject: Kurze Frage',
+      'Date: Mon, 4 Aug 2026 09:12:00 +0200',
+      'Content-Type: text/plain; charset=utf-8',
+      '',
+      'Hallo Bob,',
+      'passt Dir Donnerstag?',
+      '',
+    ),
+  });
+  assert.equal(r.extractor, 'eml');
+  assert.equal(r.textLayer, 'present');
+  assert.ok(r.text.includes('From: Anna Beispiel <anna@example.com>'));
+  assert.ok(r.text.includes('Subject: Kurze Frage'));
+  assert.ok(r.text.includes('passt Dir Donnerstag?'));
+});
+
+test('decodes quoted-printable umlauts', () => {
+  const r = extractEml({
+    data: mail(
+      'Subject: Pr=C3=BCfung',
+      'Content-Type: text/plain; charset=utf-8',
+      'Content-Transfer-Encoding: quoted-printable',
+      '',
+      'Gr=C3=BC=C3=9Fe aus M=C3=BCnchen',
+      '',
+    ),
+  });
+  assert.ok(r.text.includes('Grüße aus München'), r.text);
+});
+
+test('honours a quoted-printable soft line break', () => {
+  const r = extractEml({
+    data: mail(
+      'Content-Type: text/plain; charset=utf-8',
+      'Content-Transfer-Encoding: quoted-printable',
+      '',
+      'Dieser Satz wurde hart =',
+      'umbrochen.',
+      '',
+    ),
+  });
+  assert.ok(r.text.includes('hart umbrochen.'), r.text);
+});
+
+test('decodes a base64 body', () => {
+  const body = Buffer.from('Angebot liegt bei.', 'utf8').toString('base64');
+  const r = extractEml({
+    data: mail(
+      'Content-Type: text/plain; charset=utf-8',
+      'Content-Transfer-Encoding: base64',
+      '',
+      body,
+      '',
+    ),
+  });
+  assert.ok(r.text.includes('Angebot liegt bei.'), r.text);
+});
+
+test('decodes a non-UTF-8 charset', () => {
+  const head = Buffer.from(
+    ['Content-Type: text/plain; charset=iso-8859-1', '', ''].join('\r\n'),
+    'latin1',
+  );
+  const r = extractEml({ data: Buffer.concat([head, Buffer.from([0x47, 0x72, 0xfc, 0xdf, 0x65])]) });
+  assert.ok(r.text.includes('Grüße'), r.text);
+});
+
+test('prefers the plain-text part over HTML in multipart/alternative', () => {
+  const r = extractEml({
+    data: mail(
+      'Subject: Beides',
+      'Content-Type: multipart/alternative; boundary="b1"',
+      '',
+      '--b1',
+      'Content-Type: text/plain; charset=utf-8',
+      '',
+      'NURTEXT',
+      '--b1',
+      'Content-Type: text/html; charset=utf-8',
+      '',
+      '<p>NURHTML</p>',
+      '--b1--',
+      '',
+    ),
+  });
+  assert.ok(r.text.includes('NURTEXT'), r.text);
+  assert.ok(!r.text.includes('NURHTML'), 'HTML part must not be used when plain text exists');
+});
+
+test('falls back to HTML and strips markup', () => {
+  const r = extractEml({
+    data: mail(
+      'Content-Type: text/html; charset=utf-8',
+      '',
+      '<html><head><style>p{color:red}</style></head><body>',
+      '<p>Erste Zeile</p><p>Zweite&nbsp;Zeile &amp; mehr</p>',
+      '<script>alert(1)</script></body></html>',
+      '',
+    ),
+  });
+  assert.ok(r.text.includes('Erste Zeile'), r.text);
+  assert.ok(r.text.includes('Zweite Zeile & mehr'), r.text);
+  assert.ok(!r.text.includes('alert'), 'script content must be dropped');
+  assert.ok(!r.text.includes('color:red'), 'style content must be dropped');
+  assert.ok(r.notice?.includes('HTML'), r.notice);
+});
+
+test('lists attachments without decoding them', () => {
+  const r = extractEml({
+    data: mail(
+      'Subject: Mit Anhang',
+      'Content-Type: multipart/mixed; boundary="m1"',
+      '',
+      '--m1',
+      'Content-Type: text/plain; charset=utf-8',
+      '',
+      'Anbei der Bericht.',
+      '--m1',
+      'Content-Type: application/pdf; name="Bericht.pdf"',
+      'Content-Disposition: attachment; filename="Bericht.pdf"',
+      'Content-Transfer-Encoding: base64',
+      '',
+      Buffer.from('%PDF-1.4 nicht echt').toString('base64'),
+      '--m1--',
+      '',
+    ),
+  });
+  assert.ok(r.text.includes('Anbei der Bericht.'), r.text);
+  assert.ok(r.text.includes('--- Attachments ---'), r.text);
+  assert.ok(r.text.includes('Bericht.pdf'), r.text);
+  assert.ok(!r.text.includes('%PDF'), 'attachment payload must not be inlined');
+  assert.ok(r.notice?.includes('attachment'), r.notice);
+});
+
+test('walks nested multipart (mixed containing alternative)', () => {
+  const r = extractEml({
+    data: mail(
+      'Content-Type: multipart/mixed; boundary="outer"',
+      '',
+      '--outer',
+      'Content-Type: multipart/alternative; boundary="inner"',
+      '',
+      '--inner',
+      'Content-Type: text/plain; charset=utf-8',
+      '',
+      'TIEFERTEXT',
+      '--inner--',
+      '--outer--',
+      '',
+    ),
+  });
+  assert.ok(r.text.includes('TIEFERTEXT'), r.text);
+});
+
+test('unfolds headers that span several lines', () => {
+  const r = extractEml({
+    data: mail(
+      'Subject: Ein sehr langer Betreff, der',
+      '\tueber zwei Zeilen geht',
+      'Content-Type: text/plain; charset=utf-8',
+      '',
+      'Rumpf',
+      '',
+    ),
+  });
+  assert.ok(r.text.includes('ueber zwei Zeilen geht'), r.text);
+});
+
+test('recovers the body of a truncated multipart mail', () => {
+  // No closing --b-- delimiter: the last part must not be silently dropped.
+  const r = extractEml({
+    data: mail(
+      'Content-Type: multipart/mixed; boundary="b"',
+      '',
+      '--b',
+      'Content-Type: text/plain; charset=utf-8',
+      '',
+      'ABGESCHNITTEN',
+    ),
+  });
+  assert.ok(r.text.includes('ABGESCHNITTEN'), r.text);
+});
+
+test('a headers-only mail reports no readable content', () => {
+  const r = extractEml({
+    data: mail('From: a@example.com', 'Subject: Leer', 'Content-Type: text/plain', '', ''),
+  });
+  assert.equal(r.textLayer, 'none', 'header block alone is not content');
+});
+
+test('rejects an empty file', () => {
+  assert.throws(() => extractEml({ data: Buffer.alloc(0) }), /empty/i);
+});
+
+test('dispatches .eml by extension and by MIME type', async () => {
+  const data = mail('Subject: Weg', 'Content-Type: text/plain', '', 'Inhalt', '');
+  assert.equal((await extractText({ data, ext: 'EML' })).extractor, 'eml');
+  assert.equal((await extractText({ data, contentType: 'message/rfc822' })).extractor, 'eml');
+});
+
+test('.eml is no longer reported as unreadable', async () => {
+  const r = await extractText({
+    data: mail('Content-Type: text/plain', '', 'Da', ''),
+    contentType: 'application/octet-stream',
+    ext: 'EML',
+  });
+  assert.notEqual(r.extractor, 'none');
 });
 
 // --- Math.sumPrecise polyfill ----------------------------------------------

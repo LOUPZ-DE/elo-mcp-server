@@ -4,12 +4,13 @@ import type { ExtractInput, ExtractResult } from './types.js';
 export { EncryptedDocumentError, ExtractionFailedError } from './types.js';
 export type { ExtractResult, ExtractInput } from './types.js';
 
-type Kind = 'pdf' | 'docx' | 'plain' | 'unsupported';
+type Kind = 'pdf' | 'docx' | 'eml' | 'plain' | 'unsupported';
 
 const MIME_KINDS: Record<string, Kind> = {
   'application/pdf': 'pdf',
   'application/x-pdf': 'pdf',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+  'message/rfc822': 'eml',
   'text/plain': 'plain',
   'text/markdown': 'plain',
   'text/csv': 'plain',
@@ -22,6 +23,7 @@ const MIME_KINDS: Record<string, Kind> = {
 const EXT_KINDS: Record<string, Kind> = {
   PDF: 'pdf',
   DOCX: 'docx',
+  EML: 'eml',
   TXT: 'plain',
   MD: 'plain',
   CSV: 'plain',
@@ -39,8 +41,7 @@ const EXT_KINDS: Record<string, Kind> = {
  */
 const KNOWN_UNREADABLE: Record<string, string> = {
   ECF: 'ELO container format (typically an e-mail with attachments). Open the eloLink to see the message and its attachments; the attachments are usually filed as separate ELO documents that can be read individually.',
-  MSG: 'Outlook message file. Open the eloLink to read it.',
-  EML: 'E-mail file. Open the eloLink to read it.',
+  MSG: 'Outlook message file. Not supported — .eml is; open the eloLink to read this one.',
   DOC: 'Legacy Word format (pre-2007). Not supported — re-save as .docx or open the eloLink.',
   XLS: 'Legacy Excel format. Not supported — open the eloLink.',
   XLSX: 'Excel workbook. Spreadsheet extraction is not enabled; open the eloLink.',
@@ -99,7 +100,9 @@ export async function extractText(input: ExtractInput): Promise<ExtractResult> {
       ? await (await import('./pdf.js')).extractPdf(input)
       : kind === 'docx'
         ? await (await import('./docx.js')).extractDocx(input)
-        : extractPlain(input);
+        : kind === 'eml'
+          ? (await import('./eml.js')).extractEml(input)
+          : extractPlain(input);
 
   return { ...result, text: normaliseWhitespace(result.text) };
 }
