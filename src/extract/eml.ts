@@ -266,8 +266,12 @@ const HTML_ENTITIES: Record<string, string> = {
   mdash: '—', ndash: '–', hellip: '…', laquo: '«', raquo: '»',
 };
 
-/** Naive but effective HTML → plain: drop scripts/styles, then tags, then entities. */
-function htmlToText(html: string): string {
+/**
+ * Naive but effective HTML → plain: drop scripts/styles, then tags, then
+ * entities. Shared with the .msg extractor, whose HTML bodies are the same
+ * shape — mail clients produce both.
+ */
+export function htmlToText(html: string): string {
   const stripped = html
     .replace(/<script[\s\S]*?<\/script[^>]*>/gi, ' ')
     .replace(/<style[\s\S]*?<\/style[^>]*>/gi, ' ')

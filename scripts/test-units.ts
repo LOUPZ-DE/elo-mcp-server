@@ -21,6 +21,7 @@ import { resolveStreamUrl, isForeignHost, UnsafeStreamUrlError } from '../src/el
 import { extractText, normaliseWhitespace } from '../src/extract/index.js';
 import { sumPrecise, installSumPrecisePolyfill } from '../src/extract/sumPrecise.js';
 import { extractEml } from '../src/extract/eml.js';
+import { mapMsgFields, rtfToText } from '../src/extract/msg.js';
 import type { EloSord } from '../src/elo/types.js';
 
 let failures = 0;
@@ -410,7 +411,7 @@ test('unsupported types succeed with an explanation rather than failing', async 
   const r = await extractText({ data: Buffer.from('x'), contentType: 'application/octet-stream', ext: 'ECF' });
   assert.equal(r.extractor, 'none');
   assert.equal(r.text, '');
-  assert.ok(r.notice?.includes('container'), r.notice);
+  assert.ok(r.notice?.includes('encrypted'), r.notice);
   assert.ok(r.notice?.includes('eloLink'), r.notice);
 });
 
@@ -668,6 +669,138 @@ test('.eml is no longer reported as unreadable', async () => {
     ext: 'EML',
   });
   assert.notEqual(r.extractor, 'none');
+});
+
+// --- MSG (Outlook) ----------------------------------------------------------
+//
+// The OLE2 container is the library's job; what is ours is turning MAPI fields
+// into the same shape .eml produces, and stripping RTF when that is the only
+// body a message carries.
+
+section('mapMsgFields');
+
+test('renders a header block and the plain-text body', () => {
+  const r = mapMsgFields({
+    subject: 'Angebot',
+    senderName: 'Anna Beispiel',
+    senderEmail: 'anna@example.com',
+    messageDeliveryTime: '2026-08-04T09:12:00Z',
+    recipients: [
+      { name: 'Bob', email: 'bob@example.com', recipType: 'to' },
+      { name: 'Carla', email: 'carla@example.com', recipType: 'cc' },
+    ],
+    body: 'Anbei das Angebot.',
+  });
+  assert.equal(r.extractor, 'msg');
+  assert.equal(r.textLayer, 'present');
+  assert.ok(r.text.includes('From: Anna Beispiel <anna@example.com>'), r.text);
+  assert.ok(r.text.includes('To: Bob <bob@example.com>'), r.text);
+  assert.ok(r.text.includes('Cc: Carla <carla@example.com>'), r.text);
+  assert.ok(r.text.includes('Subject: Angebot'), r.text);
+  assert.ok(r.text.includes('Anbei das Angebot.'), r.text);
+});
+
+test('treats recipients without an explicit type as To', () => {
+  const r = mapMsgFields({ recipients: [{ name: 'Bob', email: 'bob@example.com' }], body: 'x' });
+  assert.ok(r.text.includes('To: Bob <bob@example.com>'), r.text);
+});
+
+test('does not print a name twice when it equals the address', () => {
+  const r = mapMsgFields({ senderName: 'anna@example.com', senderEmail: 'anna@example.com', body: 'x' });
+  assert.ok(r.text.includes('From: anna@example.com'), r.text);
+  assert.ok(!r.text.includes('<anna@example.com>'), r.text);
+});
+
+test('accepts smtpAddress when email is absent', () => {
+  const r = mapMsgFields({ recipients: [{ name: 'Bob', smtpAddress: 'bob@example.com' }], body: 'x' });
+  assert.ok(r.text.includes('bob@example.com'), r.text);
+});
+
+test('falls back to HTML when there is no plain body', () => {
+  const r = mapMsgFields({ bodyHtml: '<p>Hallo <b>Welt</b></p>' });
+  assert.ok(r.text.includes('Hallo'), r.text);
+  assert.ok(!r.text.includes('<b>'), r.text);
+  assert.ok(r.notice?.includes('HTML'), r.notice);
+});
+
+test('falls back to RTF when neither plain nor HTML exists', () => {
+  const rtf = String.raw`{\rtf1\ansi{\fonttbl{\f0 Arial;}}\f0 Sehr geehrte Damen,\par nach Pr\'fcfung.\par}`;
+  const r = mapMsgFields({}, rtf);
+  assert.ok(r.text.includes('Sehr geehrte Damen'), r.text);
+  assert.ok(r.text.includes('Prüfung'), r.text);
+  assert.ok(!r.text.includes('fonttbl'), 'font table must not leak into the text');
+  assert.ok(!r.text.includes('\\rtf1'), r.text);
+  assert.ok(r.notice?.includes('RTF'), r.notice);
+});
+
+test('plain text wins over HTML and RTF', () => {
+  const r = mapMsgFields({ body: 'KLARTEXT', bodyHtml: '<p>HTML</p>' }, String.raw`{\rtf1 RTF}`);
+  assert.ok(r.text.includes('KLARTEXT'), r.text);
+  assert.ok(!r.text.includes('HTML'), r.text);
+  assert.ok(!r.text.includes('RTF'), r.text);
+});
+
+test('lists attachments and never inlines them', () => {
+  const r = mapMsgFields({
+    body: 'Siehe Anhang.',
+    attachments: [
+      { fileName: 'Angebot.pdf', attachMimeTag: 'application/pdf' },
+      { name: 'bild.png' },
+    ],
+  });
+  assert.ok(r.text.includes('--- Attachments ---'), r.text);
+  assert.ok(r.text.includes('1. Angebot.pdf [application/pdf]'), r.text);
+  assert.ok(r.text.includes('2. bild.png'), r.text);
+  assert.ok(r.notice?.includes('attachment'), r.notice);
+});
+
+test('a message with no body at all is reported as unreadable', () => {
+  const r = mapMsgFields({ subject: 'Nur Anhang', attachments: [{ fileName: 'a.pdf' }] });
+  assert.equal(r.textLayer, 'none', 'header block alone is not content');
+  assert.ok(r.notice?.includes('no readable body'), r.notice);
+});
+
+section('rtfToText');
+
+test('resolves \\par, \\line and \\tab', () => {
+  assert.equal(rtfToText(String.raw`a\par b\line c\tab d`).replace(/ +/g, ' ').trim(), 'a\n b\n c\t d');
+});
+
+test('decodes \\uNNNN and hex escapes', () => {
+  // Built by concatenation so the escape reaches rtfToText intact rather than
+  // being resolved by the TypeScript source itself.
+  assert.ok(rtfToText('a ' + '\\u8364' + '? b').includes('€'));
+  assert.ok(rtfToText(String.raw`Gr\'fc\'df e`).includes('Grüß'));
+});
+
+test('keeps escaped braces and backslashes', () => {
+  const t = rtfToText(String.raw`a \{b\} c \\ d`);
+  assert.ok(t.includes('{b}'), t);
+  assert.ok(t.includes('\\'), t);
+});
+
+test('drops metadata destination groups', () => {
+  const t = rtfToText(String.raw`{\rtf1{\*\generator Riched20}{\colortbl;\red0\green0\blue0;}Text}`);
+  assert.ok(t.includes('Text'), t);
+  assert.ok(!t.includes('Riched20'), t);
+  assert.ok(!t.includes('colortbl'), t);
+});
+
+section('MSG dispatch');
+
+test('.msg routes to the msg extractor by extension', async () => {
+  // Not a valid OLE2 file, so it must fail *as a msg*, not fall through to
+  // "unsupported" — the routing is what is under test.
+  await assert.rejects(
+    () => extractText({ data: Buffer.from('kein echtes MSG'), ext: 'MSG' }),
+    /Outlook message/i,
+  );
+});
+
+test('.ecf is reported as ELO-encrypted, not as a mail container', async () => {
+  const r = await extractText({ data: Buffer.from('EloCryptAES_v'), ext: 'ECF' });
+  assert.equal(r.extractor, 'none');
+  assert.ok(r.notice?.includes('encrypted'), r.notice);
 });
 
 // --- Math.sumPrecise polyfill ----------------------------------------------

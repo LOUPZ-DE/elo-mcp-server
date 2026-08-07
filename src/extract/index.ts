@@ -4,13 +4,15 @@ import type { ExtractInput, ExtractResult } from './types.js';
 export { EncryptedDocumentError, ExtractionFailedError } from './types.js';
 export type { ExtractResult, ExtractInput } from './types.js';
 
-type Kind = 'pdf' | 'docx' | 'eml' | 'plain' | 'unsupported';
+type Kind = 'pdf' | 'docx' | 'eml' | 'msg' | 'plain' | 'unsupported';
 
 const MIME_KINDS: Record<string, Kind> = {
   'application/pdf': 'pdf',
   'application/x-pdf': 'pdf',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
   'message/rfc822': 'eml',
+  'application/vnd.ms-outlook': 'msg',
+  'application/x-msg': 'msg',
   'text/plain': 'plain',
   'text/markdown': 'plain',
   'text/csv': 'plain',
@@ -24,6 +26,7 @@ const EXT_KINDS: Record<string, Kind> = {
   PDF: 'pdf',
   DOCX: 'docx',
   EML: 'eml',
+  MSG: 'msg',
   TXT: 'plain',
   MD: 'plain',
   CSV: 'plain',
@@ -40,8 +43,10 @@ const EXT_KINDS: Record<string, Kind> = {
  * whether to open the document or ask someone to convert it.
  */
 const KNOWN_UNREADABLE: Record<string, string> = {
-  ECF: 'ELO container format (typically an e-mail with attachments). Open the eloLink to see the message and its attachments; the attachments are usually filed as separate ELO documents that can be read individually.',
-  MSG: 'Outlook message file. Not supported — .eml is; open the eloLink to read this one.',
+  // Verified against a live archive: an .ecf begins with the marker
+  // "EloCryptAES_v" — it is an ELO-encrypted document, not a mail container.
+  // The stream hands us ciphertext, so no parser can help.
+  ECF: 'ELO-encrypted document (EloCrypt). The content is encrypted at rest, so no parser can read it — ELO decrypts it only for authorised users.',
   DOC: 'Legacy Word format (pre-2007). Not supported — re-save as .docx or open the eloLink.',
   XLS: 'Legacy Excel format. Not supported — open the eloLink.',
   XLSX: 'Excel workbook. Spreadsheet extraction is not enabled; open the eloLink.',
@@ -102,7 +107,9 @@ export async function extractText(input: ExtractInput): Promise<ExtractResult> {
         ? await (await import('./docx.js')).extractDocx(input)
         : kind === 'eml'
           ? (await import('./eml.js')).extractEml(input)
-          : extractPlain(input);
+          : kind === 'msg'
+            ? await (await import('./msg.js')).extractMsg(input)
+            : extractPlain(input);
 
   return { ...result, text: normaliseWhitespace(result.text) };
 }

@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Outlook message extraction (`.msg`).** Same output shape as `.eml`: header
+  block, body, attachment manifest. Unlike `.eml` this one takes libraries —
+  `@kenjiuno/msgreader` for the OLE2 container and MAPI properties,
+  `@kenjiuno/decompressrtf` for `PidTagRtfCompressed`. Hand-rolling would mean
+  four specifications at once, and the RTF path is not optional: many Outlook
+  messages carry no plain-text body, so without it they would extract to an
+  empty string. Body preference is plain text → HTML → RTF, each stripped to
+  prose. The MAPI-fields-to-result mapping is a pure function and unit-tested
+  as such; building a valid OLE2 fixture by hand would only test the library.
 - **E-mail extraction (`.eml`, RFC 822 / MIME).** `elo_get_document_content`
   now reads e-mail files: a From/To/Cc/Subject/Date block followed by the
   message body, with attachments listed by name and type but not decoded —
@@ -18,6 +27,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `mailparser`/`postal-mime` bring 200 kB+ and transitive encoding
   dependencies for a job this narrow. `.eml` is consequently no longer
   reported as unreadable.
+
+### Changed
+- **`.ecf` is now reported as ELO-encrypted, not as a mail container.** Reading
+  the raw bytes of one from a live archive shows it begins with the marker
+  `EloCryptAES_v`: these are documents held in an ELO encryption area, and the
+  content stream hands out ciphertext. No parser can help, so the message now
+  says so and points at the eloLink, which ELO decrypts for authorised users.
 
 ### Fixed
 - **PDFs failing with `Math.sumPrecise is not a function`.** The pdf.js
