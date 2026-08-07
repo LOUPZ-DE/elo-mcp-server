@@ -1,7 +1,7 @@
 export interface ExtractResult {
   text: string;
   /** Which extractor produced the text — 'none' when the type is unsupported. */
-  extractor: 'pdf' | 'docx' | 'plain' | 'none';
+  extractor: 'pdf' | 'docx' | 'eml' | 'msg' | 'plain' | 'none';
   format: 'text' | 'markdown';
   pageCount?: number;
   /**

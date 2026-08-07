@@ -1,3 +1,4 @@
+﻿import axios from 'axios';
 // Read-only reconnaissance against the live ELO IX instance.
 //
 // BUGFIXES.md documents four cases where the schema said X and the runtime did
@@ -74,6 +75,428 @@ async function find(findInfo: unknown, max = 5): Promise<any> {
 }
 
 // ---------------------------------------------------------------------------
+
+/**
+ * Does `runAsUser` actually work, and do permissions really change?
+ *
+ * The OpenAPI spec proves the parameter exists. It does not prove the technical
+ * account may use it (ELO ties that to an administrator right), and an accepted
+ * login alone does not prove the session really runs under the other identity.
+ * So this compares an identical search across both sessions — only a difference
+ * in what comes back is evidence.
+ */
+async function runAsProbe(targetUser: string): Promise<void> {
+  hr(`runAsUser — Verifikation für "${targetUser}"`);
+
+  // --- 1. Baseline: the technical user -------------------------------------
+  await client.login();
+  ok('Login technischer User', 'erfolgreich');
+
+  let baselineSession = '(nicht abrufbar)';
+  try {
+    const info = await client.request<any>('/rest/IXServicePortIF/getSessionInfos', {});
+    baselineSession = describeSession(info);
+    ok('Sitzung läuft als', baselineSession);
+  } catch (e) {
+    err('getSessionInfos (technischer User)', e);
+  }
+
+  // --- 2. The actual question ----------------------------------------------
+  hr('Wird runAsUser akzeptiert?');
+  const asUser = new EloClient({
+    baseUrl: cfg.ELO_BASE_URL,
+    username: cfg.ELO_USERNAME,
+    password: cfg.ELO_PASSWORD,
+    basicAuthUser: cfg.ELO_BASIC_AUTH_USER,
+    basicAuthPass: cfg.ELO_BASIC_AUTH_PASS,
+    language: cfg.ELO_LANGUAGE,
+    country: cfg.ELO_COUNTRY,
+    timeZone: cfg.ELO_TIMEZONE,
+    runAsUser: targetUser,
+  });
+
+  try {
+    await asUser.login();
+    ok('runAsUser', 'AKZEPTIERT — der technische User darf sich als anderer Benutzer anmelden');
+  } catch (e) {
+    err('runAsUser', e);
+    // IX collapses "you may not do this" and "no such user" onto the same
+    // generic 3008. Without separating them the result is not actionable.
+    await diagnoseRunAsFailure(targetUser);
+    return;
+  }
+
+  try {
+    const info = await asUser.request<any>('/rest/IXServicePortIF/getSessionInfos', {});
+    const asSession = describeSession(info);
+    ok('Sitzung läuft als', asSession);
+    if (asSession === baselineSession) {
+      no('WARNUNG', 'beide Sitzungen melden denselben Benutzer — runAsUser wirkt womöglich nicht');
+    } else {
+      ok('Identitätswechsel', `${baselineSession} → ${asSession}`);
+    }
+  } catch (e) {
+    err('getSessionInfos (runAsUser)', e);
+  }
+
+  // --- 3. Do permissions actually differ? ----------------------------------
+  hr('Wirken die Berechtigungen? (identische Suche, beide Sitzungen)');
+  const query = process.env.PROBE_QUERY ?? 'Bericht';
+  const findInfo = {
+    findByESearch: {
+      searchOptions: {},
+      searchParams: { query, searchIn: 'TITLE,FULLTEXT,INDEX_FIELDS' },
+    },
+  };
+
+  const collect = async (c: EloClient, label: string) => {
+    const res = await c.request<any>('/rest/IXServicePortIF/findFirstSords', {
+      findInfo,
+      max: 200,
+      sordZ: SORD_Z_ALL,
+    });
+    const sords: any[] = res.result?.sords ?? [];
+    const ids = new Set(sords.map((s) => String(s.id)));
+    const paths = sords.map((s) => (s.refPaths?.[0]?.path ?? []).map((p: any) => p.name).join('/'));
+    const topLevel = new Set(paths.map((p) => p.split('/')[0]).filter(Boolean));
+    ok(`${label}: Treffer`, `${sords.length} (geschätzt gesamt: ${res.result?.estimatedCount ?? '-'})`);
+    console.log(`         Top-Level-Bereiche: ${[...topLevel].sort().join(', ') || '(keine)'}`);
+    return { ids, topLevel, count: sords.length };
+  };
+
+  try {
+    const base = await collect(client, 'technischer User');
+    const impersonated = await collect(asUser, `als "${targetUser}"`);
+
+    const onlyForTech = [...base.ids].filter((id) => !impersonated.ids.has(id));
+    const onlyForUser = [...impersonated.ids].filter((id) => !base.ids.has(id));
+    const areasLost = [...base.topLevel].filter((a) => !impersonated.topLevel.has(a));
+
+    hr('Bewertung');
+    if (onlyForTech.length === 0 && onlyForUser.length === 0) {
+      no('Treffermengen', 'IDENTISCH — kein Nachweis, dass die Rechte wechseln');
+      console.log('  Entweder hat das Testkonto dieselben Rechte wie der technische User,');
+      console.log('  oder runAsUser wirkt nicht. Test mit einem bewusst eingeschränkten');
+      console.log('  Konto wiederholen, sonst ist die Aussage wertlos.');
+    } else {
+      ok('Treffermengen unterscheiden sich', `${onlyForTech.length} nur für den technischen User sichtbar`);
+      if (areasLost.length > 0) {
+        ok('NACHWEIS', `Bereiche, die "${targetUser}" nicht sieht: ${areasLost.join(', ')}`);
+      }
+      if (onlyForUser.length > 0) {
+        console.log(`  Hinweis: ${onlyForUser.length} Objekte sieht nur "${targetUser}" — plausibel bei persönlichen Ablagen.`);
+      }
+    }
+  } catch (e) {
+    err('Suchvergleich', e);
+  }
+
+  // --- 4. Mapping: does ELO know the AD account / e-mail? ------------------
+  hr('Zuordnung: kennt ELO das Windows-Konto oder die E-Mail?');
+  try {
+    const res = await client.request<any>('/rest/IXServicePortIF/checkoutUser', {
+      // The parameter is `id` (accepts name, id or GUID), not `userId`.
+      id: targetUser,
+      checkoutUsersZ: { bset: '-1' },
+      lockZ: LOCK_Z_NO,
+    });
+    const user = res.result;
+    if (!user) {
+      no('checkoutUser', 'kein result');
+    } else {
+      ok('UserInfo-Felder', Object.keys(user).join(', '));
+      const props: unknown[] = user.userProps ?? [];
+      const filled = props
+        .map((v, i) => ({ i, v: typeof v === 'string' ? v : '' }))
+        .filter((e) => e.v.length > 0);
+      ok('userProps', `${props.length} Felder, ${filled.length} belegt`);
+      for (const e of filled) {
+        // Report the *shape*, not the value — these are personal records.
+        const shape = e.v.includes('@')
+          ? 'E-MAIL-FORMAT'
+          : /\\/.test(e.v)
+            ? 'DOMAIN\\KONTO-FORMAT'
+            : /^[A-Za-z][A-Za-z0-9._-]{2,20}$/.test(e.v)
+              ? 'kurzes Konto-Format'
+              : 'sonstiger Text';
+        console.log(`         userProps[${e.i}] → ${shape} (${e.v.length} Zeichen)`);
+      }
+      if (filled.some((e) => e.v.includes('@') || /\\/.test(e.v))) {
+        ok('ERGEBNIS', 'ELO kennt eine E-Mail bzw. ein AD-Konto → automatische Zuordnung möglich');
+      } else {
+        no('ERGEBNIS', 'kein E-Mail-/AD-Feld erkennbar → Zuordnungstabelle nötig');
+      }
+    }
+  } catch (e) {
+    err('checkoutUser', e);
+  }
+
+  hr('Fertig');
+}
+
+/**
+ * Separate "the technical account may not impersonate" from "that identifier is
+ * not what runAsUser expects". IX returns [ELOIX:3008] for both.
+ */
+async function diagnoseRunAsFailure(targetUser: string): Promise<void> {
+  hr('Diagnose — fehlendes Recht oder falsche Kennung?');
+
+  // A) Is the name a valid ELO user identifier at all?
+  let userIdentifiers: string[] = [];
+  try {
+    // The parameter is `id` (name, id or GUID), not `userId`. And unlike SordZ,
+    // CheckoutUsersC rejects bset '-1' — so try the plausible values rather
+    // than assuming the SORD_Z_ALL convention carries over.
+    const u = await checkoutUserAny(targetUser);
+    if (u) {
+      ok('checkoutUser', `"${targetUser}" ist ein gültiger ELO-Benutzer (id=${u.id})`);
+      userIdentifiers = [u.name, String(u.id), u.guid].filter(Boolean);
+
+      // ldapProperties is where an AD-synced installation keeps the directory
+      // link — the difference between automatic identity mapping and a
+      // hand-maintained table.
+      const ldap = u.ldapProperties;
+      if (ldap && (typeof ldap !== 'object' || Object.keys(ldap).length > 0)) {
+        const asText = typeof ldap === 'string' ? ldap : JSON.stringify(ldap);
+        ok('ldapProperties', `belegt (${asText.length} Zeichen)`);
+        console.log(`         Muster: ${asText.replace(/[A-Za-zÄÖÜäöüß]/g, 'a').replace(/[0-9]/g, '9').slice(0, 120)}`);
+        if (/@/.test(asText)) console.log('         enthält E-Mail-Format');
+        if (/\\|CN=|DC=/i.test(asText)) console.log('         enthält AD-/LDAP-Kennung');
+        for (const v of asText.match(/"([^"]{2,60})"/g) ?? []) {
+          if (/@|\\|CN=|DC=/i.test(v)) userIdentifiers.push(v.replace(/"/g, ''));
+        }
+      } else {
+        no('ldapProperties', 'leer — keine Verzeichnisverknüpfung an diesem Benutzer');
+      }
+
+      if (u.lastLoginIso) ok('letzter Login', String(u.lastLoginIso));
+      if (typeof u.internalUser === 'boolean') ok('internalUser', String(u.internalUser));
+
+      const props: unknown[] = u.userProps ?? [];
+      const filled = props
+        .map((v, i) => ({ i, v: typeof v === 'string' ? v : '' }))
+        .filter((e) => e.v.length > 0);
+      ok('userProps belegt', `${filled.length} von ${props.length}`);
+      for (const e of filled) {
+        const shape = e.v.includes('@')
+          ? 'E-MAIL-FORMAT'
+          : /\\/.test(e.v)
+            ? 'DOMAIN\\KONTO-FORMAT'
+            : /^[A-Za-z][A-Za-z0-9._-]{2,20}$/.test(e.v)
+              ? 'kurzes Konto-Format'
+              : 'sonstiger Text';
+        console.log(`         userProps[${e.i}] → ${shape} (${e.v.length} Zeichen)`);
+        if (shape !== 'sonstiger Text') userIdentifiers.push(e.v);
+      }
+    } else {
+      no('checkoutUser', 'kein result — Name evtl. ungültig');
+    }
+  } catch (e) {
+    err('checkoutUser', e);
+  }
+
+  // B) Self-impersonation. If the mechanism works at all, running as *yourself*
+  //    must be permitted — so a failure here isolates the missing right.
+  hr('Selbsttest: runAsUser = technischer User');
+  const selfOk = await tryRunAs(cfg.ELO_USERNAME, 'technischer User (self)');
+  if (selfOk) {
+    ok('SCHLUSSFOLGERUNG', 'Mechanismus funktioniert — der Fehler lag an der Kennung, nicht am Recht');
+  } else {
+    no('SCHLUSSFOLGERUNG', 'auch der Selbsttest scheitert → dem technischen User fehlt das Recht');
+  }
+
+  // C) Try the other identifier forms ELO might expect.
+  const alternatives = [...new Set(userIdentifiers)].filter((v) => v !== targetUser);
+  if (alternatives.length > 0) {
+    hr('Alternative Kennungen für denselben Benutzer');
+    for (const alt of alternatives) {
+      await tryRunAs(alt, `Kennung "${alt.length > 40 ? alt.slice(0, 40) + '…' : alt}"`);
+    }
+  }
+
+  hr('Bewertung');
+  console.log('  [ELOIX:3008] deckt in IX mehrere Ursachen ab. Wenn der Selbsttest oben');
+  console.log('  ebenfalls scheitert, ist es das fehlende Recht — dann muss die ELO-');
+  console.log('  Administration dem technischen Konto das Recht zum Anmelden als anderer');
+  console.log('  Benutzer geben (üblicherweise Hauptadministrator). Erst danach erneut testen.');
+}
+
+/**
+ * Try every login shape IX offers for acting as another user.
+ *
+ * `login` + `runAsUser` is refused even with FLAG_ADMIN directly assigned, so
+ * the assumption that it is *the* impersonation mechanism needs testing rather
+ * than repeating. Credentials come from the config, never the command line.
+ */
+async function loginVariants(target: string): Promise<void> {
+  hr(`Anmeldevarianten für Impersonation von "${target}"`);
+
+  const http = axios.create({
+    baseURL: cfg.ELO_BASE_URL,
+    headers: { 'Content-Type': 'application/json' },
+    timeout: 30_000,
+  });
+  const basic =
+    'Basic ' +
+    Buffer.from(
+      `${cfg.ELO_BASIC_AUTH_USER ?? cfg.ELO_USERNAME}:${cfg.ELO_BASIC_AUTH_PASS ?? cfg.ELO_PASSWORD}`,
+    ).toString('base64');
+  const ci = { language: cfg.ELO_LANGUAGE, country: cfg.ELO_COUNTRY, timeZone: cfg.ELO_TIMEZONE };
+  const creds = { userName: cfg.ELO_USERNAME, userPwd: cfg.ELO_PASSWORD, clientComputer: 'MCP-Probe' };
+
+  const variants: Array<[string, string, Record<string, unknown>]> = [
+    ['login + runAsUser', 'login', { ci, ...creds, runAsUser: target }],
+    ['loginAdmin + reportAsUser', 'loginAdmin', { ci, ...creds, reportAsUser: target }],
+    ['loginAdmin ohne reportAsUser', 'loginAdmin', { ci, ...creds }],
+    ['login ohne runAsUser (Referenz)', 'login', { ci, ...creds }],
+  ];
+
+  for (const [label, method, body] of variants) {
+    try {
+      const res = await http.post<any>(`/rest/IXServicePortIF/${method}`, body, {
+        headers: { Authorization: basic },
+      });
+      const ex = res.data?.exception;
+      if (ex) {
+        const msg = typeof ex === 'string' ? ex : (ex.message ?? JSON.stringify(ex));
+        no(label, msg.replace(/\[TICKET:[^\]]*\]/, '').slice(0, 110));
+      } else {
+        // Whose session did we actually get? That is the whole question.
+        const user = res.data?.result?.user;
+        const who = user?.name ?? '(kein user im Ergebnis)';
+        ok(label, `AKZEPTIERT — Sitzung gehört zu: ${who}`);
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      err(label, msg.slice(0, 110));
+    }
+  }
+
+  hr('Lesart');
+  console.log('  "login ohne runAsUser" muss gelingen — sonst stimmen die Zugangsdaten nicht.');
+  console.log('  Gelingt eine Variante und nennt dabei den Zielbenutzer, ist das der Weg.');
+  console.log('  Scheitern alle Impersonationsvarianten trotz gesetztem FLAG_ADMIN, ist die');
+  console.log('  Funktion serverseitig nicht freigegeben — dann ist es eine Frage an ELO.');
+}
+
+/**
+ * Side-by-side dump of the fields that decide whether an account can
+ * authenticate at all. Built because a service account existed in the archive
+ * (`checkoutUser` found it) yet was refused at login with the same generic
+ * [ELOIX:3008] the client shows for an unknown user — which suggests ELO is
+ * validating the password somewhere other than its own store.
+ */
+async function accountProbe(names: string[]): Promise<void> {
+  hr(`Kontovergleich: ${names.join(' vs. ')}`);
+
+  const fields = [
+    'id',
+    'name',
+    'type',
+    'flags',
+    'flags2',
+    'internalUser',
+    'lastLoginIso',
+    'superiorId',
+    'parent',
+  ] as const;
+
+  const rows: Array<Record<string, string>> = [];
+  for (const name of names) {
+    const u = await checkoutUserAny(name);
+    if (!u) {
+      rows.push({ name: `${name} (nicht lesbar)` });
+      continue;
+    }
+    const row: Record<string, string> = {};
+    for (const f of fields) {
+      const v = (u as any)[f];
+      row[f] = v === undefined || v === null ? '—' : typeof v === 'object' ? '{…}' : String(v);
+    }
+    // Values are personal data; report presence and shape only.
+    const ldap = (u as any).ldapProperties;
+    const ldapText = ldap ? (typeof ldap === 'string' ? ldap : JSON.stringify(ldap)) : '';
+    row.ldapProperties = ldapText.length > 0 ? `belegt (${ldapText.length} Zeichen)` : 'leer';
+    const props: unknown[] = (u as any).userProps ?? [];
+    const filled = props.filter((v) => typeof v === 'string' && v.length > 0).length;
+    row.userProps = `${filled}/${props.length} belegt`;
+    row.pwdGesetzt = (u as any).pwd ? 'ja' : 'nein/verborgen';
+    rows.push(row);
+  }
+
+  const cols = ['id', 'type', 'flags', 'flags2', 'internalUser', 'lastLoginIso', 'ldapProperties', 'userProps', 'pwdGesetzt'];
+  for (const c of cols) {
+    const cells = rows.map((r, i) => `${names[i]}=${r[c] ?? '—'}`);
+    const differs = new Set(rows.map((r) => r[c] ?? '—')).size > 1;
+    console.log(`  ${differs ? '≠' : ' '} ${c.padEnd(16)} ${cells.join('   |   ')}`);
+  }
+
+  hr('Lesart');
+  console.log('  Mit ≠ markierte Zeilen sind die Unterschiede. Kann sich das eine Konto');
+  console.log('  anmelden und das andere nicht, steckt die Ursache mit hoher Wahrscheinlichkeit');
+  console.log('  in genau einer davon — insbesondere internalUser und ldapProperties zeigen an,');
+  console.log('  ob ELO das Passwort selbst prueft oder an das Verzeichnis delegiert.');
+}
+
+/**
+ * `checkoutUser` with whichever CheckoutUsersC bitset this IX accepts.
+ * Returns the UserInfo, or null when every variant is refused.
+ */
+async function checkoutUserAny(id: string): Promise<any | null> {
+  const variants: Array<[string, Record<string, unknown>]> = [
+    ['ohne checkoutUsersZ', { id, lockZ: LOCK_Z_NO }],
+    ['bset 0', { id, checkoutUsersZ: { bset: '0' }, lockZ: LOCK_Z_NO }],
+    ['bset 1', { id, checkoutUsersZ: { bset: '1' }, lockZ: LOCK_Z_NO }],
+    ['bset 3', { id, checkoutUsersZ: { bset: '3' }, lockZ: LOCK_Z_NO }],
+    ['bset 255', { id, checkoutUsersZ: { bset: '255' }, lockZ: LOCK_Z_NO }],
+  ];
+  for (const [label, body] of variants) {
+    try {
+      const res = await client.request<any>('/rest/IXServicePortIF/checkoutUser', body);
+      if (res.result) {
+        ok('checkoutUser-Variante', label);
+        return res.result;
+      }
+    } catch {
+      /* try the next shape */
+    }
+  }
+  no('checkoutUser', 'keine der Varianten akzeptiert');
+  return null;
+}
+
+async function tryRunAs(name: string, label: string): Promise<boolean> {
+  const c = new EloClient({
+    baseUrl: cfg.ELO_BASE_URL,
+    username: cfg.ELO_USERNAME,
+    password: cfg.ELO_PASSWORD,
+    basicAuthUser: cfg.ELO_BASIC_AUTH_USER,
+    basicAuthPass: cfg.ELO_BASIC_AUTH_PASS,
+    language: cfg.ELO_LANGUAGE,
+    country: cfg.ELO_COUNTRY,
+    timeZone: cfg.ELO_TIMEZONE,
+    runAsUser: name,
+  });
+  try {
+    await c.login();
+    ok(label, 'AKZEPTIERT');
+    return true;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    no(label, msg.replace(/\[TICKET:[^\]]*\]/, '').slice(0, 120));
+    return false;
+  }
+}
+
+/**
+ * `getSessionInfos` returns *all* active IX sessions, not the caller's own, so
+ * it cannot identify "who am I". Report the scale instead of guessing a name.
+ */
+function describeSession(info: any): string {
+  const r = info?.result;
+  if (Array.isArray(r)) return `${r.length} aktive IX-Sitzungen insgesamt (serverweit)`;
+  return `unerwartete Form: ${typeof r}`;
+}
 
 async function adHoc(method: string, bodyJson: string): Promise<void> {
   const body = bodyJson ? JSON.parse(bodyJson) : {};
@@ -494,7 +917,34 @@ async function battery(): Promise<void> {
 async function main() {
   const [method, body] = process.argv.slice(2);
   try {
-    if (method) {
+    if (method === '--runas') {
+      const target = process.argv.slice(3).join(' ').trim();
+      if (!target) {
+        console.error('Bitte den ELO-Benutzernamen angeben, z. B.:');
+        console.error('  npm run probe:runas -- "Vorname Nachname"');
+        process.exitCode = 1;
+        return;
+      }
+      await runAsProbe(target);
+    } else if (method === '--variants') {
+      const target = process.argv.slice(3).join(' ').trim();
+      if (!target) {
+        console.error('Bitte den Zielbenutzer angeben, z. B.:');
+        console.error('  npm run probe:variants -- "Vorname Nachname"');
+        process.exitCode = 1;
+        return;
+      }
+      await loginVariants(target);
+    } else if (method === '--accounts') {
+      const names = process.argv.slice(3).filter(Boolean);
+      if (names.length < 2) {
+        console.error('Bitte mindestens zwei Kontonamen/IDs angeben, z. B.:');
+        console.error('  npm run probe:accounts -- <Dienstkonto> Administrator');
+        process.exitCode = 1;
+        return;
+      }
+      await accountProbe(names);
+    } else if (method) {
       await adHoc(method, body ?? '{}');
     } else {
       await battery();
@@ -508,3 +958,4 @@ async function main() {
 }
 
 main();
+

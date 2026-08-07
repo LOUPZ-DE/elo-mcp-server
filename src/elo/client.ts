@@ -38,6 +38,16 @@ export interface EloClientConfig {
   language: string;
   country: string;
   timeZone: string;
+  /**
+   * Run the IX session under this user's identity instead of the technical
+   * user's. The technical account authenticates; ELO then applies *this*
+   * user's permissions to every call on the session.
+   *
+   * Requires the technical account to hold the corresponding ELO right
+   * (typically main administrator). Verify with `npm run probe:runas` before
+   * depending on it — IX rejects the login outright when the right is missing.
+   */
+  runAsUser?: string;
 }
 
 const SESSION_REFRESH_MS = 8 * 60 * 1000; // re-login after 8 min (IX default timeout ≈ 10 min)
@@ -74,9 +84,15 @@ export class EloClient {
       userName: this.config.username,
       userPwd: this.config.password,
       clientComputer: 'MCP-Server',
+      // Omitted entirely when unset — IX rejects some requests that carry
+      // unexpected null-valued fields (see BUGFIXES #4/#6 on body shape).
+      ...(this.config.runAsUser ? { runAsUser: this.config.runAsUser } : {}),
     };
 
-    logger.debug({ baseUrl: this.config.baseUrl }, 'ELO login: sending');
+    logger.debug(
+      { baseUrl: this.config.baseUrl, runAsUser: this.config.runAsUser },
+      'ELO login: sending',
+    );
     const response = await this.http.post<LoginResponse>(
       '/rest/IXServicePortIF/login',
       body,
@@ -127,7 +143,10 @@ export class EloClient {
     this.eloApproved = typeof approvedHeader === 'string' ? approvedHeader : 'true';
 
     this.loginTimestamp = Date.now();
-    logger.info({ haveTicket: !!this.ticket, haveCookie: !!this.sessionId }, 'ELO login successful');
+    logger.info(
+      { haveTicket: !!this.ticket, haveCookie: !!this.sessionId, runAsUser: this.config.runAsUser },
+      'ELO login successful',
+    );
   }
 
   private authHeaders(): Record<string, string> {

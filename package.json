@@ -48,13 +48,17 @@
     "test:live": "tsx scripts/test-live.ts",
     "test:http": "npm run build && tsx scripts/test-http.ts",
     "probe": "tsx scripts/probe-ix.ts",
+    "probe:runas": "tsx scripts/probe-ix.ts --runas",
     "inspect": "npx @modelcontextprotocol/inspector node dist/index.js",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "probe:accounts": "tsx scripts/probe-ix.ts --accounts",
+    "probe:variants": "tsx scripts/probe-ix.ts --variants"
   },
   "engines": {
     "node": ">=22"
   },
   "dependencies": {
+    "@kenjiuno/msgreader": "^1.28.0",
     "@modelcontextprotocol/sdk": "^1.0.0",
     "axios": "^1.7.0",
     "dotenv": "^16.4.5",
