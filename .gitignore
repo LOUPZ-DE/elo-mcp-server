@@ -21,3 +21,6 @@ context.md
 # belong in BUGFIXES.md, the product documentation in README.md and docs/.
 ELO-Erkenntnisse.md
 Testgruppe-Info.md
+
+# PR description drafted for the maintainer; not part of the published repo.
+PR-Beschreibung.md
