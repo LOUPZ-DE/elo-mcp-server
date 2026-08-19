@@ -1,6 +1,6 @@
 {
   "name": "elo-mcp-server",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Read-only Model Context Protocol (MCP) server for the ELO Digital Office document management system. Exposes search, folder listing, metadata, document links and document text extraction to LLM agents via stdio and Streamable HTTP transports.",
   "type": "module",
   "bin": {

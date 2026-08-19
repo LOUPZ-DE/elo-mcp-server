@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-19
+
 ### Added
 - **Outlook message extraction (`.msg`).** Same output shape as `.eml`: header
   block, body, attachment manifest. Unlike `.eml` this one takes libraries —
@@ -27,6 +29,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `mailparser`/`postal-mime` bring 200 kB+ and transitive encoding
   dependencies for a job this narrow. `.eml` is consequently no longer
   reported as unreadable.
+- **ELO impersonation diagnostics.** `EloClient` gains an optional
+  `runAsUser` (additive; omitted from the login body when unset, so default
+  behaviour is unchanged) plus three read-only probe modes: `npm run probe:runas`
+  attempts impersonation and compares result sets across both sessions,
+  `probe:accounts` puts the fields that decide whether an account can
+  authenticate side by side, and `probe:variants` walks every login shape IX
+  offers. Groundwork for running under each end user's own ELO identity — the
+  mechanism is present in the API but refused by the instance, so this release
+  ships the diagnostics and the evidence, not the feature. See `BUGFIXES.md` #21.
 
 ### Changed
 - **`.ecf` is now reported as ELO-encrypted, not as a mail container.** Reading
@@ -188,7 +199,8 @@ First public release.
   the 0.1.0 release. See `BUGFIXES.md` for the substantive design and
   protocol-quirk decisions made during that phase.
 
-[Unreleased]: https://github.com/LOUPZ-DE/elo-mcp-server/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/LOUPZ-DE/elo-mcp-server/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/LOUPZ-DE/elo-mcp-server/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/LOUPZ-DE/elo-mcp-server/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/LOUPZ-DE/elo-mcp-server/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/LOUPZ-DE/elo-mcp-server/releases/tag/v0.1.0
