@@ -21,3 +21,10 @@ context.md
 # belong in BUGFIXES.md, the product documentation in README.md and docs/.
 ELO-Erkenntnisse.md
 Testgruppe-Info.md
+
+# PR description drafted for the maintainer; not part of the published repo.
+PR-Beschreibung.md
+
+# GitHub issue drafted locally before being filed; the issue itself is the
+# published artefact, not this file.
+Issue-Encrypted-State.md

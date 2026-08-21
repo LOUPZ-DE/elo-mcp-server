@@ -1,6 +1,6 @@
 {
   "name": "elo-mcp-server",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Read-only Model Context Protocol (MCP) server for the ELO Digital Office document management system. Exposes search, folder listing, metadata, document links and document text extraction to LLM agents via stdio and Streamable HTTP transports.",
   "type": "module",
   "bin": {
@@ -52,17 +52,19 @@
     "inspect": "npx @modelcontextprotocol/inspector node dist/index.js",
     "typecheck": "tsc --noEmit",
     "probe:accounts": "tsx scripts/probe-ix.ts --accounts",
-    "probe:variants": "tsx scripts/probe-ix.ts --variants"
+    "probe:variants": "tsx scripts/probe-ix.ts --variants",
+    "test:oauth": "npm run build && tsx scripts/test-oauth.ts"
   },
   "engines": {
     "node": ">=22"
   },
   "dependencies": {
     "@kenjiuno/msgreader": "^1.28.0",
-    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "axios": "^1.7.0",
     "dotenv": "^16.4.5",
     "express": "^4.21.0",
+    "jose": "^6.1.3",
     "mammoth": "^1.12.0",
     "pino": "^9.5.0",
     "unpdf": "^1.8.0",

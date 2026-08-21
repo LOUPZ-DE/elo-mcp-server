@@ -3,7 +3,6 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import express, { type Request, type Response, type NextFunction } from 'express';
-import { timingSafeEqual } from 'node:crypto';
 import { loadConfig } from './utils/config.js';
 import { logger } from './utils/logger.js';
 import { EloClient } from './elo/client.js';
@@ -23,6 +22,23 @@ import {
   GetDocumentContentInputSchema,
 } from './tools/elo_get_document_content.js';
 import { createSemaphore } from './utils/semaphore.js';
+import { setConfig } from './utils/runtimeConfig.js';
+import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js';
+import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
+import { McpTokenVerifier } from './oauth/verifier.js';
+import { prmHandler, asMetadataHandler, mcpDescriptorHandler } from './oauth/metadata.js';
+import { registerHandler } from './oauth/register.js';
+import { authorizeGetHandler, authorizePostHandler } from './oauth/authorize.js';
+import { tokenHandler } from './oauth/token.js';
+import { startStoreSweep } from './oauth/store.js';
+import {
+  dropEloSession,
+  getEloSession,
+  isStaleCredentialError,
+  startEloSessionSweep,
+} from './authn/eloLogin.js';
+import { corsMiddleware } from './utils/cors.js';
+import { rateLimit } from './utils/rateLimit.js';
 
 let cfg: ReturnType<typeof loadConfig>;
 try {
@@ -33,8 +49,15 @@ try {
   );
   process.exit(1);
 }
+// Publish it before anything else imports it — the OAuth and authn modules all
+// read the config back from here rather than parsing the environment again.
+setConfig(cfg);
 
-const eloClient = new EloClient({
+/**
+ * The technical account. Used for stdio, for shared-secret callers, and as the
+ * only identity that existed before OAuth — its behaviour is unchanged.
+ */
+const serviceClient = new EloClient({
   baseUrl: cfg.ELO_BASE_URL,
   username: cfg.ELO_USERNAME,
   password: cfg.ELO_PASSWORD,
@@ -44,6 +67,42 @@ const eloClient = new EloClient({
   country: cfg.ELO_COUNTRY,
   timeZone: cfg.ELO_TIMEZONE,
 });
+
+/**
+ * Run a tool against whichever ELO identity the caller authenticated as.
+ *
+ * An OAuth caller carries an `eloSid` handle into the session vault and gets
+ * their own IX session, with their own permissions. Everyone else — stdio, and
+ * anyone holding the shared secret — gets the technical account, exactly as
+ * before. There is deliberately no third case: an OAuth token whose session
+ * has gone is an error, never a quiet downgrade to the technical account.
+ */
+async function withEloClient<T>(
+  authInfo: AuthInfo | undefined,
+  run: (client: EloClient) => Promise<T>,
+): Promise<T> {
+  const sid = typeof authInfo?.extra?.eloSid === 'string' ? authInfo.extra.eloSid : undefined;
+  if (!sid) return run(serviceClient);
+
+  const session = getEloSession(sid);
+  if (!session) {
+    // The verifier normally catches this first; reaching here means the session
+    // expired between the token check and the tool call.
+    throw new Error(
+      'Your ELO session has expired. Reconnect this server in your client to sign in again.',
+    );
+  }
+
+  try {
+    return await run(session.client);
+  } catch (err) {
+    // A password change makes the stored credentials useless: EloClient will
+    // keep trying to re-login with them every eight minutes and keep failing.
+    // Dropping the session turns that into one 401 and a fresh login instead.
+    if (isStaleCredentialError(err)) dropEloSession(sid);
+    throw err;
+  }
+}
 
 const linkOptions = { webclientBaseUrl: cfg.ELO_WEBCLIENT_URL };
 
@@ -137,13 +196,14 @@ Identifying the right object:
 - When several projects match and none is an exact match, ask the user which one is meant rather than choosing.
 
 Completeness:
-- Results carry \`truncated\` and a \`note\`. When \`truncated\` is true the list is incomplete — never present it as exhaustive, and never call the first entry "the latest" or "the only" one.`;
+- Results carry \`truncated\` and a \`note\`. When \`truncated\` is true the list is incomplete — never present it as exhaustive, and never call the first entry "the latest" or "the only" one.
+- Every result is filtered by the ELO permissions of the account this connection signed in as. A document you cannot see may still exist. Say "I did not find it" — never "it does not exist in ELO".`;
 
 function createServer(): McpServer {
   const server = new McpServer(
     {
       name: 'elo-mcp-server',
-      version: '0.3.0',
+      version: '0.4.0',
     },
     { instructions: SERVER_INSTRUCTIONS },
   );
@@ -168,9 +228,11 @@ function createServer(): McpServer {
       inputSchema: SearchInputSchema,
       annotations: readOnly,
     },
-    async (args) => {
+    async (args, extra) => {
       try {
-        return asTextResult(await eloSearch(eloClient, args, listingOptions));
+        return asTextResult(
+          await withEloClient(extra.authInfo, (c) => eloSearch(c, args, listingOptions)),
+        );
       } catch (err) {
         return asError(err);
       }
@@ -188,9 +250,13 @@ function createServer(): McpServer {
       inputSchema: FindProjectFolderInputSchema,
       annotations: readOnly,
     },
-    async (args) => {
+    async (args, extra) => {
       try {
-        return asTextResult(await eloFindProjectFolder(eloClient, args, projectFolderOptions));
+        return asTextResult(
+          await withEloClient(extra.authInfo, (c) =>
+            eloFindProjectFolder(c, args, projectFolderOptions),
+          ),
+        );
       } catch (err) {
         return asError(err);
       }
@@ -208,9 +274,11 @@ function createServer(): McpServer {
       inputSchema: ListFolderInputSchema,
       annotations: readOnly,
     },
-    async (args) => {
+    async (args, extra) => {
       try {
-        return asTextResult(await eloListFolder(eloClient, args, listingOptions));
+        return asTextResult(
+          await withEloClient(extra.authInfo, (c) => eloListFolder(c, args, listingOptions)),
+        );
       } catch (err) {
         return asError(err);
       }
@@ -231,10 +299,12 @@ function createServer(): McpServer {
         inputSchema: GetDocumentContentInputSchema,
         annotations: readOnly,
       },
-      async (args) => {
+      async (args, extra) => {
         try {
           return asTextResult(
-            await withContentSlot(() => eloGetDocumentContent(eloClient, args, contentOptions)),
+            await withContentSlot(() =>
+              withEloClient(extra.authInfo, (c) => eloGetDocumentContent(c, args, contentOptions)),
+            ),
           );
         } catch (err) {
           return asError(err);
@@ -253,9 +323,11 @@ function createServer(): McpServer {
       inputSchema: GetMetadataInputSchema,
       annotations: readOnly,
     },
-    async (args) => {
+    async (args, extra) => {
       try {
-        return asTextResult(await eloGetMetadata(eloClient, args, linkOptions));
+        return asTextResult(
+          await withEloClient(extra.authInfo, (c) => eloGetMetadata(c, args, linkOptions)),
+        );
       } catch (err) {
         return asError(err);
       }
@@ -273,9 +345,11 @@ function createServer(): McpServer {
       inputSchema: GetDocumentLinkInputSchema,
       annotations: readOnly,
     },
-    async (args) => {
+    async (args, extra) => {
       try {
-        return asTextResult(await eloGetDocumentLink(eloClient, args, linkOptions));
+        return asTextResult(
+          await withEloClient(extra.authInfo, (c) => eloGetDocumentLink(c, args, linkOptions)),
+        );
       } catch (err) {
         return asError(err);
       }
@@ -292,44 +366,72 @@ async function startStdio() {
 }
 
 async function startHttp() {
-  // Required at this point because config.ts already validated it.
-  const secret = cfg.MCP_SHARED_SECRET!;
-  const secretBuf = Buffer.from(secret);
-
   const app = express();
+  // Easypanel/Traefik terminates TLS, so the client address and scheme arrive
+  // in X-Forwarded-*. Without this the rate limiter would see one IP for
+  // everyone and cookies would not be marked Secure.
+  app.set('trust proxy', 1);
   app.use(express.json({ limit: '1mb' }));
+  // Form posts only reach /authorize and /token; everything else is JSON.
+  const formParser = express.urlencoded({ extended: false, limit: '64kb' });
 
   app.get('/health', (_req, res) => {
-    res.json({ ok: true, transport: 'http' });
+    res.json({ ok: true, transport: 'http', authMode: cfg.MCP_AUTH_MODE });
   });
 
-  const requireAuth = (req: Request, res: Response, next: NextFunction): void => {
-    const header = req.header('authorization') ?? '';
-    const provided = header.replace(/^Bearer\s+/i, '');
-    const providedBuf = Buffer.from(provided);
-    const ok =
-      providedBuf.length === secretBuf.length &&
-      timingSafeEqual(providedBuf, secretBuf);
-    if (!ok) {
-      // Surface misconfigured connectors (wrong/missing token) — a common cause
-      // of "client won't connect" that is otherwise invisible.
-      logger.warn(
-        {
-          httpMethod: req.method,
-          hasAuthHeader: header.length > 0,
-          providedLength: provided.length,
-        },
-        'MCP request rejected: bad or missing bearer token',
-      );
-      res.status(401).json({ error: 'Unauthorized' });
-      return;
-    }
-    next();
-  };
+  if (cfg.oauthEnabled) {
+    // Discovery. A client that gets a 401 from /mcp finds its way here through
+    // the resource_metadata hint in the WWW-Authenticate header.
+    app.get('/.well-known/oauth-protected-resource', corsMiddleware, prmHandler);
+    // RFC 9728 §3.1 path-suffixed variant; some clients ask only for this one.
+    app.get('/.well-known/oauth-protected-resource/mcp', corsMiddleware, prmHandler);
+    app.get('/.well-known/oauth-authorization-server', corsMiddleware, asMetadataHandler);
+    // Not an OIDC provider, but several clients probe this alias first.
+    app.get('/.well-known/openid-configuration', corsMiddleware, asMetadataHandler);
+    app.get('/.well-known/mcp.json', corsMiddleware, mcpDescriptorHandler);
+
+    // Anonymous writes and password submissions — the two endpoints worth
+    // making expensive to hammer.
+    const registerLimiter = rateLimit({ windowMs: 60_000, max: 20, name: 'register' });
+    const authorizeLimiter = rateLimit({ windowMs: 60_000, max: 30, name: 'authorize' });
+    const tokenLimiter = rateLimit({ windowMs: 60_000, max: 60, name: 'token' });
+
+    app.post('/register', corsMiddleware, registerLimiter, registerHandler);
+
+    // No CORS on /authorize: it is a top-level browser navigation, not an
+    // XHR target, and advertising cross-origin access to a login form invites
+    // exactly the framing it should not allow.
+    app.get('/authorize', authorizeLimiter, authorizeGetHandler);
+    // Express 4 does not forward a rejected promise to the error handler — that
+    // only arrived in Express 5, which is what the reference implementation
+    // relies on. Without this wrapper a failed login would hang the response.
+    app.post('/authorize', authorizeLimiter, formParser, (req, res, next) => {
+      void authorizePostHandler(req, res).catch(next);
+    });
+
+    app.post('/token', corsMiddleware, tokenLimiter, formParser, (req, res, next) => {
+      void tokenHandler(req, res).catch(next);
+    });
+
+    startStoreSweep();
+    startEloSessionSweep();
+  }
+
+  // One gate for both credentials. McpTokenVerifier accepts the shared secret
+  // and OAuth access tokens alike (subject to MCP_AUTH_MODE) and reports which
+  // one it was through req.auth, which the transport passes to the tools.
+  //
+  // Replacing the hand-rolled check with this also fixes something that was
+  // missing before: the 401 now carries a WWW-Authenticate header, which is
+  // what makes a client offer "Sign in" instead of just failing.
+  const bearerAuth = requireBearerAuth({
+    verifier: new McpTokenVerifier(),
+    ...(cfg.oauthEnabled ? { resourceMetadataUrl: cfg.PRM_URL } : {}),
+  });
 
   let reqCounter = 0;
 
-  app.all('/mcp', requireAuth, async (req, res) => {
+  app.all('/mcp', corsMiddleware, bearerAuth, async (req, res) => {
     // Stateless: a fresh transport per request. Simpler model and fine for
     // automation clients (n8n/Make/Notion-agents/claude.ai) where each call
     // is an independent JSON-RPC exchange.
@@ -340,6 +442,10 @@ async function startHttp() {
       // text/event-stream on a GET signals a long-lived SSE stream (e.g. Notion);
       // surfacing it makes overlap-with-POST issues visible at a glance.
       accept: req.header('accept'),
+      // Which identity the call runs as. `eloUser` present means a per-user
+      // OAuth session; absent means the technical account.
+      eloUser: req.auth?.extra?.userName,
+      oauthClientId: req.auth?.clientId,
       ...rpc,
     });
     const start = process.hrtime.bigint();
@@ -387,9 +493,28 @@ async function startHttp() {
     }
   });
 
+  app.use((_req: Request, res: Response) => {
+    res.status(404).json({ error: 'not_found' });
+  });
+
+  // The OAuth handlers are async and forward their rejections here rather than
+  // leaving the response hanging. Without this Express 4 would answer with its
+  // default HTML error page, which an OAuth client cannot parse.
+  app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+    logger.error({ err }, 'Unhandled error in HTTP handler');
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'server_error' });
+    }
+  });
+
   app.listen(cfg.MCP_HTTP_PORT, cfg.MCP_HTTP_HOST, () => {
     logger.info(
-      { host: cfg.MCP_HTTP_HOST, port: cfg.MCP_HTTP_PORT },
+      {
+        host: cfg.MCP_HTTP_HOST,
+        port: cfg.MCP_HTTP_PORT,
+        authMode: cfg.MCP_AUTH_MODE,
+        ...(cfg.oauthEnabled ? { issuer: cfg.PUBLIC_BASE_URL } : {}),
+      },
       'ELO MCP server listening on HTTP',
     );
   });

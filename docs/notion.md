@@ -96,17 +96,22 @@ every tool builds its links from that one value.
 
 ### OAuth requirement
 
-If Notion does **not** accept a Bearer token and insists on the OAuth 2.0
-Authorization Code Flow, two workarounds:
+If Notion does not accept a Bearer token and insists on "Sign in with OAuth",
+the server can do that itself — set `MCP_AUTH_MODE=both` and give it a public
+base URL and two signing secrets. Notion then registers itself, the user gets a
+login form, and their ELO credentials are checked against ELO.
 
-1. **Put mcpo in between** (see [Open WebUI guide](./open-webui.md)). Some
-   mcpo versions can proxy OAuth — Notion speaks OAuth with mcpo, mcpo
-   speaks Bearer to the MCP server. Check the current mcpo docs.
-2. **Add an OAuth endpoint to the MCP server.** Express routes for
-   `/authorize` and `/token`, a static client (`client_id` /
-   `client_secret`), and an in-memory authorization-code store — roughly
-   150 lines, plus extra attack surface. Only worth doing if path 1 is
-   blocked.
+Two things follow from that, and the second is the more interesting one:
+
+- Nobody has to paste a token.
+- Every tool call runs under **that user's** ELO permissions, instead of the
+  technical account's. Which is the only way to get per-user permissions here at
+  all — IX impersonation is refused by the live instance (`BUGFIXES.md` #21).
+
+Setup, limits and the reasoning: **[OAuth 2.1 + DCR](./oauth-dcr.md)**.
+
+The shared secret keeps working alongside it, so n8n, Make and Open WebUI need
+no change.
 
 ## Path B: Notion Agents
 

@@ -78,7 +78,9 @@ See [`.env.example`](.env.example) for the complete list with comments.
 | `ELO_LANGUAGE` / `ELO_COUNTRY` / `ELO_TIMEZONE` | ClientInfo defaults |
 | `MCP_TRANSPORT` | `stdio` (default) or `http` |
 | `MCP_HTTP_HOST` / `MCP_HTTP_PORT` | HTTP transport bind address (default `0.0.0.0:3000`) |
-| `MCP_SHARED_SECRET` | Required when `MCP_TRANSPORT=http`. Bearer token for the HTTP transport |
+| `MCP_SHARED_SECRET` | Bearer token for the HTTP transport. Required unless `MCP_AUTH_MODE=oauth` |
+| `MCP_AUTH_MODE` | `shared` (default), `oauth` or `both`. See [OAuth 2.1 + DCR](docs/oauth-dcr.md) |
+| `PUBLIC_BASE_URL`, `OAUTH_TOKEN_SECRET`, `OAUTH_SESSION_SECRET` | Required when OAuth is enabled |
 | `LOG_LEVEL` | pino level, default `info` |
 
 ## Local testing with the MCP Inspector
@@ -104,8 +106,9 @@ it mirrors the workflow the tool descriptions steer the model towards:
 ### Automated tests
 
 ```powershell
-npm run test:unit    # offline; link building, paths, ranking, URL resolution, extraction
+npm run test:unit    # offline; link building, paths, ranking, URL resolution, extraction, OAuth primitives
 npm run test:http    # spawns the HTTP transport; auth, tools/list, SSE regression
+npm run test:oauth   # offline; the whole OAuth + DCR flow against a stub IX server
 npm run test:live    # end-to-end against your real ELO instance (read-only)
 npm run probe        # read-only reconnaissance of IX runtime behaviour
 ```
@@ -136,14 +139,17 @@ Edit `%APPDATA%\Claude\claude_desktop_config.json`:
 }
 ```
 
-Restart Claude Desktop. The four `elo_*` tools must appear in the tool list.
+Restart Claude Desktop. The six `elo_*` tools must appear in the tool list.
 
 ## Client integrations
 
 Step-by-step guides for the most common integration paths:
 
-- [Open WebUI / OpenAPI (via mcpo)](docs/open-webui.md)
+- [Open WebUI (native MCP)](docs/open-webui.md)
 - [Notion (Custom Connector, Agents, n8n bridge, claude.ai)](docs/notion.md)
+- [OAuth 2.1 + Dynamic Client Registration](docs/oauth-dcr.md) — let users sign
+  in with their own ELO account instead of sharing one API key, so tool calls
+  run under their own ELO permissions
 
 ## Remote hosting (Easypanel)
 
@@ -191,6 +197,10 @@ containing the MCP message.
 - The server is read-only — no write tools are registered. A leaked token
   grants read access to your ELO contents through the configured technical
   user, nothing more.
+- That last point is the argument for [OAuth](docs/oauth-dcr.md): with
+  `MCP_AUTH_MODE=both`, users who sign in with their own ELO account are
+  scoped to their own ELO permissions, and a leaked token of theirs exposes
+  only what they could already see.
 - Optionally restrict by source IP in Easypanel's Traefik labels if your
   callers come from a fixed set of addresses.
 
@@ -230,11 +240,9 @@ talking to ELO IX REST — and how they were resolved — see
 
 ## Roadmap
 
-- Rate-limiting (`express-rate-limit`) and request audit logging on the HTTP
-  transport.
-- Per-client tokens with rotation, replacing the single shared secret.
-- Optional OAuth flow for clients that require it (Notion Custom Connectors,
-  claude.ai).
+- Encrypted persistence for OAuth state ([#4](https://github.com/LOUPZ-DE/elo-mcp-server/issues/4)), so a redeploy does not sign everyone
+  out. Deliberately not done in memory-only form: the store holds live ELO
+  sessions, which must not be written to a volume in clear text.
 - Spreadsheet (`.xlsx`) and legacy `.doc` extraction. Deferred: the npm `xlsx`
   package is frozen with known CVEs and the maintained build lives outside npm,
   which is a poor fit for a public repository. `exceljs` is the likely route.
