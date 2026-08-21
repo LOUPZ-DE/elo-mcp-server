@@ -23,6 +23,12 @@ import { sumPrecise, installSumPrecisePolyfill } from '../src/extract/sumPrecise
 import { extractEml } from '../src/extract/eml.js';
 import { mapMsgFields, rtfToText } from '../src/extract/msg.js';
 import type { EloSord } from '../src/elo/types.js';
+import { randomToken, s256Challenge, verifyS256 } from '../src/oauth/pkce.js';
+import { signAccessToken, verifyAccessTokenJwt } from '../src/oauth/jwt.js';
+import { McpTokenVerifier, SHARED_SECRET_CLIENT_ID } from '../src/oauth/verifier.js';
+import { setConfig, config } from '../src/utils/runtimeConfig.js';
+import { setSession, getSession } from '../src/authn/session.js';
+import { classifyLoginError, isStaleCredentialError, resetEloSessions } from '../src/authn/eloLogin.js';
 
 let failures = 0;
 let count = 0;
@@ -890,6 +896,220 @@ test('pdf.js usage shape: summing glyph widths works', () => {
   // _getTextWidth does exactly this: sum widths, then divide by 1000.
   const widths = [500, 722, 333, 611, 278];
   assert.equal(sumPrecise(widths) / 1e3, 2.444);
+});
+
+// --- OAuth: PKCE ------------------------------------------------------------
+
+section('OAuth — PKCE');
+
+test('a generated verifier matches its own challenge', () => {
+  const verifier = randomToken(32);
+  assert.ok(verifyS256(verifier, s256Challenge(verifier)));
+});
+
+test('a different verifier does not match', () => {
+  assert.ok(!verifyS256(randomToken(32), s256Challenge(randomToken(32))));
+});
+
+test('a verifier shorter than RFC 7636 allows is rejected outright', () => {
+  // 43 characters is the floor. Anything shorter must fail on the format check
+  // rather than being hashed and compared.
+  const short = 'abc';
+  assert.ok(!verifyS256(short, s256Challenge(short)));
+});
+
+test('a verifier with characters outside the allowed alphabet is rejected', () => {
+  const bad = '!'.repeat(50);
+  assert.ok(!verifyS256(bad, s256Challenge(bad)));
+});
+
+// --- OAuth: config-dependent modules ----------------------------------------
+//
+// Everything below needs a parsed config, which is normally published by the
+// entry point. Build a minimal one here rather than reading the environment.
+
+setConfig({
+  ELO_BASE_URL: 'https://ix.example/ix',
+  ELO_WEBCLIENT_URL: 'https://link.example',
+  ELO_USERNAME: 'tech',
+  ELO_PASSWORD: 'tech-pw',
+  ELO_LANGUAGE: 'de',
+  ELO_COUNTRY: 'DE',
+  ELO_TIMEZONE: 'UTC',
+  ELO_PROJECT_NUMBER_FIELD: 'PRJ_NO',
+  ELO_PROJECT_NAME_FIELD: 'PRJ_NAME',
+  ELO_PROJECT_MARKER_FIELD: 'SOL_TYPE',
+  ELO_PROJECT_MARKER_VALUE: 'PROJEKT',
+  LOG_LEVEL: 'fatal',
+  ELO_MAX_DOCUMENT_BYTES: 1024,
+  ELO_MAX_TEXT_CHARS: 1000,
+  ELO_DOWNLOAD_TIMEOUT_MS: 1000,
+  ELO_CONTENT_CONCURRENCY: 1,
+  ELO_DOCUMENT_CONTENT_ENABLED: true,
+  MCP_TRANSPORT: 'http',
+  MCP_HTTP_PORT: 3000,
+  MCP_HTTP_HOST: '127.0.0.1',
+  MCP_SHARED_SECRET: 'unit-test-shared-secret',
+  MCP_AUTH_MODE: 'both',
+  PUBLIC_BASE_URL: 'https://mcp.example',
+  OAUTH_TOKEN_SECRET: 'unit-test-token-secret-at-least-32-chars',
+  OAUTH_SESSION_SECRET: 'unit-test-session-secret-at-least-32-ch',
+  OAUTH_ACCESS_TOKEN_TTL: 3600,
+  OAUTH_REFRESH_TOKEN_TTL: 2_592_000,
+  OAUTH_SERVER_NAME: 'ELO MCP Server',
+  OAUTH_MAX_CLIENTS: 500,
+  ELO_USER_SESSION_TTL: 28_800,
+  ELO_MAX_USER_SESSIONS: 50,
+  oauthEnabled: true,
+  sharedSecretEnabled: true,
+  MCP_RESOURCE: 'https://mcp.example/mcp',
+  PRM_URL: 'https://mcp.example/.well-known/oauth-protected-resource',
+});
+
+section('OAuth — access token');
+
+const sampleClaims = {
+  userName: 'jdoe',
+  displayName: 'Jane Doe',
+  clientId: 'client-1',
+  eloSid: 'sid-abc',
+};
+
+test('a freshly signed token verifies', async () => {
+  const payload = await verifyAccessTokenJwt(await signAccessToken(sampleClaims));
+  assert.equal(payload.sub, 'jdoe');
+  assert.equal(payload.iss, 'https://mcp.example');
+  assert.equal(payload.aud, 'https://mcp.example/mcp');
+  assert.equal(payload.elo_sid, 'sid-abc');
+});
+
+test('the token carries a handle, never the credentials', async () => {
+  const token = await signAccessToken(sampleClaims);
+  const claims = JSON.parse(Buffer.from(token.split('.')[1]!, 'base64url').toString('utf8'));
+  assert.ok(!('password' in claims));
+  assert.ok(!('userPwd' in claims));
+  assert.equal(typeof claims.elo_sid, 'string');
+});
+
+test('a tampered signature is rejected', async () => {
+  const [header, body] = (await signAccessToken(sampleClaims)).split('.');
+  await assert.rejects(() => verifyAccessTokenJwt(`${header}.${body}.${'A'.repeat(43)}`));
+});
+
+test('a token issued for another audience is rejected', async () => {
+  const token = await signAccessToken(sampleClaims);
+  // Same secret, different deployment. `aud` is what keeps the two apart.
+  setConfig({ ...config(), MCP_RESOURCE: 'https://other.example/mcp' });
+  await assert.rejects(() => verifyAccessTokenJwt(token));
+  setConfig({ ...config(), MCP_RESOURCE: 'https://mcp.example/mcp' });
+});
+
+section('OAuth — bearer verification');
+
+test('the shared secret is accepted and carries no ELO session', async () => {
+  const info = await new McpTokenVerifier().verifyAccessToken('unit-test-shared-secret');
+  assert.equal(info.clientId, SHARED_SECRET_CLIENT_ID);
+  assert.equal(info.extra?.eloSid, undefined);
+});
+
+test('a wrong shared secret is refused', async () => {
+  await assert.rejects(() => new McpTokenVerifier().verifyAccessToken('nope'));
+});
+
+test('a valid token whose ELO session is gone is refused, not downgraded', async () => {
+  // The important half is "not downgraded": falling back to the technical
+  // account here would hand the caller permissions they never had.
+  resetEloSessions();
+  const token = await signAccessToken(sampleClaims);
+  await assert.rejects(
+    () => new McpTokenVerifier().verifyAccessToken(token),
+    /ELO session/i,
+  );
+});
+
+section('OAuth — login failure classification');
+
+function axiosError(status?: number): Error {
+  return Object.assign(new Error(`Request failed with status code ${status ?? '?'}`), {
+    isAxiosError: true,
+    ...(status ? { response: { status } } : {}),
+  });
+}
+
+test('IX error 3008 is the user’s problem, not the server’s', () => {
+  const err = classifyLoginError(
+    new Error('ELO login rejected: [ELOIX:3008] Unbekannter Benutzer, falsches Passwort'),
+  );
+  assert.equal(err.kind, 'credentials');
+});
+
+test('a 401 from the proxy is the server’s problem', () => {
+  // The user typed nothing wrong — ELO_BASIC_AUTH_* is misconfigured.
+  assert.equal(classifyLoginError(axiosError(401)).kind, 'proxy-auth');
+});
+
+test('no response at all reads as unreachable', () => {
+  assert.equal(classifyLoginError(axiosError()).kind, 'unreachable');
+});
+
+test('another IX rejection is not reported as a wrong password', () => {
+  // A licence limit is not something the user can fix by retyping.
+  const err = classifyLoginError(new Error('ELO login rejected: [ELOIX:9001] no free licence'));
+  assert.equal(err.kind, 'ix-rejected');
+});
+
+test('a stale-credential error is recognised so the session can be dropped', () => {
+  assert.ok(isStaleCredentialError(new Error('ELO login rejected: [ELOIX:3008] …')));
+  assert.ok(!isStaleCredentialError(new Error('ELO findFirstSords failed (HTTP 500)')));
+});
+
+section('OAuth — browser session cookie');
+
+/** Minimal Response stand-in: only `append` is exercised by setSession. */
+function fakeRes(): { headers: string[]; append(name: string, value: string): void } {
+  const headers: string[] = [];
+  return { headers, append: (_name, value) => void headers.push(value) };
+}
+
+function fakeReq(cookie: string): { get(name: string): string | undefined } {
+  return { get: (name) => (name.toLowerCase() === 'cookie' ? cookie : undefined) };
+}
+
+const sampleIdentity = {
+  userName: 'jdoe',
+  displayName: 'Jane Doe',
+  idp: 'elo',
+  eloSid: 'sid-abc',
+};
+
+test('a cookie round-trips through sign and verify', () => {
+  const res = fakeRes();
+  setSession(res as never, sampleIdentity);
+  const cookie = res.headers[0]!.split(';')[0]!;
+  assert.deepEqual(getSession(fakeReq(cookie) as never), sampleIdentity);
+});
+
+test('a cookie with a tampered payload is rejected', () => {
+  const res = fakeRes();
+  setSession(res as never, sampleIdentity);
+  const [name, value] = res.headers[0]!.split(';')[0]!.split('=') as [string, string];
+  const forged = Buffer.from(
+    JSON.stringify({ ...sampleIdentity, userName: 'admin', exp: 2_000_000_000 }),
+    'utf8',
+  ).toString('base64url');
+  const signature = value.slice(value.lastIndexOf('.') + 1);
+  assert.equal(getSession(fakeReq(`${name}=${forged}.${signature}`) as never), undefined);
+});
+
+test('the cookie is HttpOnly and SameSite=Lax', () => {
+  const res = fakeRes();
+  setSession(res as never, sampleIdentity);
+  assert.match(res.headers[0]!, /HttpOnly/);
+  assert.match(res.headers[0]!, /SameSite=Lax/);
+});
+
+test('no cookie header at all is not a session', () => {
+  assert.equal(getSession(fakeReq('') as never), undefined);
 });
 
 // --- summary ---------------------------------------------------------------

@@ -119,3 +119,19 @@ export interface EloResponse<T> {
 export type FindResponse = EloResponse<EloFindResult>;
 export type CheckoutResponse = EloResponse<EloEditInfo>;
 export type LoginResponse = EloResponse<EloLoginResult>;
+
+/**
+ * `checkoutUser` returns the UserInfo directly under `result` — not wrapped in
+ * a `userInfo` field (verified in scripts/probe-ix.ts). Only the fields we read
+ * are declared; `flags` is deliberately absent because it holds directly
+ * assigned rights only and is not usable on its own (BUGFIXES #20).
+ */
+export interface EloUserInfo {
+  id?: string;
+  name?: string;
+  guid?: string;
+  /** Free-text description on the account; often the person's full name. */
+  desc?: string;
+}
+
+export type CheckoutUserResponse = EloResponse<EloUserInfo>;

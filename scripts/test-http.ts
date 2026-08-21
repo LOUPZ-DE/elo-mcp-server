@@ -130,6 +130,46 @@ async function main(): Promise<void> {
     (r) => r.status === 401,
   );
 
+  // MCP_AUTH_MODE is unset here, so the server is in its default 'shared' mode.
+  // The next three checks are the promise that adding OAuth changed nothing for
+  // an existing deployment: no new public endpoints, and no advertisement of an
+  // authorization server that is not running. The OAuth flow itself is covered
+  // end to end by scripts/test-oauth.ts.
+  await check(
+    'default mode: no protected-resource document is published',
+    () => fetch(`${BASE}/.well-known/oauth-protected-resource`),
+    (r) => r.status === 404 || `expected 404, got ${r.status}`,
+  );
+
+  await check(
+    'default mode: dynamic client registration is not exposed',
+    () =>
+      fetch(`${BASE}/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{"redirect_uris":["https://example.com/cb"]}',
+      }),
+    (r) => r.status === 404 || `expected 404, got ${r.status}`,
+  );
+
+  await check(
+    'default mode: 401 states the scheme but points at no authorization server',
+    () =>
+      fetch(`${BASE}/mcp`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      }),
+    (r) => {
+      const header = r.headers.get('www-authenticate') ?? '';
+      if (!header.startsWith('Bearer')) return `WWW-Authenticate was "${header}"`;
+      if (header.includes('resource_metadata')) {
+        return 'shared mode must not advertise resource_metadata';
+      }
+      return true;
+    },
+  );
+
   await check(
     'POST /mcp with wrong Bearer → 401',
     () =>

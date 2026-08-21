@@ -16,6 +16,21 @@ export const logger = pino(
         'headers.Authorization',
         'config.headers.Cookie',
         'config.headers.cookie',
+        // OAuth material. `code` and `code_verifier` are single-use, but a log
+        // is read long after the fact and a refresh token is not single-use at
+        // all — none of them belong in one.
+        'code',
+        '*.code',
+        'code_verifier',
+        '*.code_verifier',
+        'access_token',
+        '*.access_token',
+        'refresh_token',
+        '*.refresh_token',
+        'client_secret',
+        '*.client_secret',
+        'body.password',
+        'req.body.password',
       ],
       censor: '[REDACTED]',
     },

@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **OAuth 2.1 authorization server with Dynamic Client Registration.** Clients
+  that want "Sign in with OAuth" — Notion Custom Connectors, claude.ai — can now
+  connect without anyone pasting a token: the client registers itself (RFC 7591),
+  the user gets a login form, and their credentials are checked against ELO.
+  Authorization code with mandatory PKCE (S256), refresh tokens with rotation,
+  RFC 9728 protected-resource and RFC 8414 authorization-server metadata, and a
+  401 that finally carries `WWW-Authenticate` — which is the header that makes a
+  client offer to sign in rather than simply failing.
+- **Per-user ELO permissions.** This is the part that matters beyond
+  convenience. A signed-in user gets their own IX session, so every tool call
+  runs under *their* ELO rights instead of the technical account's. That was
+  supposed to be `runAsUser`'s job; the live instance refuses it outright and
+  gives the same error for "not allowed" and "no such user" (`BUGFIXES.md` #21).
+  Signing the user in directly sidesteps the mechanism entirely.
+- **Two-stage credential verification.** Submitting the login form runs `login`
+  — inspecting the `exception` body, because IX reports bad credentials as
+  HTTP 200 (`BUGFIXES.md` #1) — and then one real read on the new session. Only
+  the second stage proves the session can actually do something. Failures are
+  classified so the form can distinguish a wrong password from a misconfigured
+  `ELO_BASIC_AUTH_*`, which are the same "login failed" from the outside and
+  have completely different fixes.
+- `MCP_AUTH_MODE` (`shared` | `oauth` | `both`), defaulting to `shared`. The
+  default is exactly the previous behaviour and mounts none of the new
+  endpoints, so an existing deployment is untouched by a redeploy. `both`
+  serves API-key and OAuth clients on the same `/mcp`.
+- `npm run test:oauth` — the full flow against a stub IX server, offline. It
+  asserts the two things the design turns on: that a tool invoked with a user's
+  token runs on that user's IX session, and that the Basic Auth presented to the
+  proxy in front of IX is still the technical account.
+- Fixed-window rate limiting on `/authorize`, `/token` and `/register`, and CORS
+  on the discovery, registration, token and `/mcp` routes.
+
+### Changed
+- `requireBearerAuth` from the MCP SDK replaces the hand-rolled bearer check.
+  Both credentials are verified through one `OAuthTokenVerifier`, so the rest of
+  the server sees a single `AuthInfo` and does not care which one was used.
+- Log redaction now covers `code`, `code_verifier`, `access_token`,
+  `refresh_token`, `client_secret` and form passwords. A failed login logs the
+  failure *kind* only — never the attempted user name, which is where a
+  mistyped password ends up.
+- The server instructions now tell the model that results are filtered by the
+  signed-in account's ELO permissions, and that "not found" is not "does not
+  exist".
+- `jose` added as a direct dependency (already present transitively via the MCP
+  SDK); the SDK range moved from `^1.0.0` to `^1.30.0`, which is where
+  `requireBearerAuth` and `req.auth` pass-through come from.
+
+### Security
+- ELO credentials are held in memory only, keyed by an opaque handle. The access
+  token is signed but **not** encrypted, so it carries the handle and never the
+  password. A restart therefore signs everyone out — deliberate: persisting the
+  store means encrypting live ELO sessions at rest, which is tracked separately.
+- A token whose ELO session is gone is refused with a 401. It is never served
+  under the technical account, which would silently grant permissions the user
+  does not have.
+
 ## [0.4.0] - 2026-08-19
 
 ### Added
