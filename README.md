@@ -139,13 +139,13 @@ Edit `%APPDATA%\Claude\claude_desktop_config.json`:
 }
 ```
 
-Restart Claude Desktop. The four `elo_*` tools must appear in the tool list.
+Restart Claude Desktop. The six `elo_*` tools must appear in the tool list.
 
 ## Client integrations
 
 Step-by-step guides for the most common integration paths:
 
-- [Open WebUI / OpenAPI (via mcpo)](docs/open-webui.md)
+- [Open WebUI (native MCP)](docs/open-webui.md)
 - [Notion (Custom Connector, Agents, n8n bridge, claude.ai)](docs/notion.md)
 - [OAuth 2.1 + Dynamic Client Registration](docs/oauth-dcr.md) — let users sign
   in with their own ELO account instead of sharing one API key, so tool calls

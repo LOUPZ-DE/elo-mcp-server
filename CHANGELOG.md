@@ -55,6 +55,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   SDK); the SDK range moved from `^1.0.0` to `^1.30.0`, which is where
   `requireBearerAuth` and `req.auth` pass-through come from.
 
+### Removed
+- **The `mcpo` wrapper image and the OpenAPI bridge it served.** It existed for
+  two reasons and has neither left: Open WebUI has spoken MCP natively since
+  0.9, and the OAuth support above replaces the "put mcpo in between" workaround
+  for clients that insist on OAuth. What remains is an unpinned third-party base
+  image in a public repo and a documented architecture that hands
+  `MCP_SHARED_SECRET` to a container we do not control. `docs/open-webui.md` is
+  now the direct-MCP path only. Recoverable with
+  `git checkout cfef1f4 -- mcpo/` if an OpenAPI-only consumer ever turns up.
+
 ### Security
 - ELO credentials are held in memory only, keyed by an opaque handle. The access
   token is signed but **not** encrypted, so it carries the handle and never the
