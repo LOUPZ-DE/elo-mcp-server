@@ -8,7 +8,7 @@ import type { AuthnIdentity } from '../authn/identity.js';
 // the identities attached to them are the index into the credential vault, and
 // writing them to a plain file — as the reference implementation does — would
 // put a map of live ELO sessions on the container's disk. Encrypted persistence
-// is tracked separately; see docs/oauth-dcr.md.
+// is tracked in issue #4; see docs/oauth-dcr.md.
 //
 // Consequence to keep in mind: a redeploy drops every registration and every
 // session, so clients re-register and users log in again.

@@ -240,7 +240,7 @@ talking to ELO IX REST — and how they were resolved — see
 
 ## Roadmap
 
-- Encrypted persistence for OAuth state, so a redeploy does not sign everyone
+- Encrypted persistence for OAuth state ([#4](https://github.com/LOUPZ-DE/elo-mcp-server/issues/4)), so a redeploy does not sign everyone
   out. Deliberately not done in memory-only form: the store holds live ELO
   sessions, which must not be written to a volume in clear text.
 - Spreadsheet (`.xlsx`) and legacy `.doc` extraction. Deferred: the npm `xlsx`

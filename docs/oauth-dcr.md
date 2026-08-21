@@ -132,8 +132,8 @@ Consequences worth knowing before you deploy:
 
 - **A restart logs everyone out.** Registrations, refresh tokens and sessions
   are all in memory. Clients re-register automatically; users see the login form
-  again. Persisting this needs encryption at rest and is tracked as a separate
-  piece of work.
+  again. Persisting this needs encryption at rest and is tracked separately in
+  [#4](https://github.com/LOUPZ-DE/elo-mcp-server/issues/4).
 - **An expired session is a 401, never a downgrade.** When a token's session is
   gone, the request is refused. It is never quietly served under the technical
   account — that would hand someone permissions they never had.
@@ -206,4 +206,4 @@ Deliberate, and worth stating plainly:
   whether to send the origin, the `/mcp` URL, or neither, and rejecting the
   flow over it would be an opaque dead end. The audience minted is always
   `PUBLIC_BASE_URL/mcp` regardless, so this cannot widen a token.
-- **No state persistence.** See above.
+- **No state persistence.** See above, and [#4](https://github.com/LOUPZ-DE/elo-mcp-server/issues/4).

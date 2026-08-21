@@ -69,7 +69,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ELO credentials are held in memory only, keyed by an opaque handle. The access
   token is signed but **not** encrypted, so it carries the handle and never the
   password. A restart therefore signs everyone out — deliberate: persisting the
-  store means encrypting live ELO sessions at rest, which is tracked separately.
+  store means encrypting live ELO sessions at rest, tracked in [#4](https://github.com/LOUPZ-DE/elo-mcp-server/issues/4).
 - A token whose ELO session is gone is refused with a 401. It is never served
   under the technical account, which would silently grant permissions the user
   does not have.
