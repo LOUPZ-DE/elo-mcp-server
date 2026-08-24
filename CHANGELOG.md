@@ -8,6 +8,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Excel extraction (`.xlsx`, `.xlsm`).** `elo_get_document_content` now reads
+  workbooks. Output is one block per sheet — a `Sheet: <name>` heading, then one
+  line per row with cells joined by ` | `. Not tabs: the dispatcher's whitespace
+  normalisation collapses runs of tabs and spaces, so a TSV grid would arrive at
+  the model as a single space with its columns gone. Not markdown tables either
+  — the padding and separator row cost tokens on every row of a wide sheet and
+  tell a reader nothing.
+
+  `read-excel-file` rather than the `exceljs` the roadmap used to name: exceljs
+  has not shipped since October 2023 and pulls in `archiver`, `unzipper` and
+  `tmp`, i.e. write-side and filesystem machinery for a job that only reads.
+  SheetJS stays rejected for the reason already recorded — the npm build is
+  frozen at 0.18.5 with known advisories. `npm audit` remains clean.
+
+  The feature that decided it is number formats. A date in a sheet is stored as
+  a serial number, and reporting `45658` where `2025-01-01` was meant is not a
+  gap but a wrong answer; the library resolves formats from `xl/styles.xml`.
+  A password-protected workbook is an OLE2 container rather than a ZIP, which is
+  indistinguishable from a legacy `.xls` saved under the wrong name — the
+  message names both possibilities instead of guessing.
+
+  Bounded at 20 000 rows per workbook and says so when it stops: xlsx is
+  compressed, so a file well inside the 15 MB download cap can flatten into a
+  string large enough to exhaust a small container.
+- Legacy `.xls` keeps its "not supported" answer, now naming the binary BIFF
+  format and suggesting a re-save rather than only offering the link.
 - **OAuth 2.1 authorization server with Dynamic Client Registration.** Clients
   that want "Sign in with OAuth" — Notion Custom Connectors, claude.ai — can now
   connect without anyone pasting a token: the client registers itself (RFC 7591),
