@@ -324,6 +324,29 @@ async function main(): Promise<void> {
       (regRes.status === 201 && clientId.length > 0) || `status ${regRes.status}`,
     );
 
+    // A client asking to authenticate with a secret must still get registered,
+    // as a public one. Refusing left such clients unable to register at all,
+    // and a client falling back to a cached client_id then looks — from the
+    // server — exactly like one that never registered.
+    const confidentialRes = await fetch(`${BASE}/register`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        client_name: 'Confidential Client',
+        redirect_uris: [REDIRECT_URI],
+        token_endpoint_auth_method: 'client_secret_basic',
+      }),
+    });
+    const confidential = await confidentialRes.json();
+    check(
+      'a client asking for a secret is registered as public, not refused',
+      (confidentialRes.status === 201 &&
+        typeof confidential.client_id === 'string' &&
+        // RFC 7591 §3.2.1: tell the client what it actually got.
+        confidential.token_endpoint_auth_method === 'none') ||
+        `status ${confidentialRes.status}, body ${JSON.stringify(confidential)}`,
+    );
+
     // --- Wrong password ----------------------------------------------------
     const bad = pkcePair();
     const badTxn = await newTxn(clientId, bad.challenge, 'state-bad');

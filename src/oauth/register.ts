@@ -43,13 +43,56 @@ const clientMetadataSchema = z
   // have no use for.
   .passthrough();
 
-function dcrError(res: Response, status: number, error: string, description: string): void {
+/**
+ * Refuse a registration — and say so in the log.
+ *
+ * A rejected registration used to be silent, which made it indistinguishable
+ * from a client that never tried. When the client then falls back to a
+ * client_id it cached earlier, the visible symptom is an "unknown client_id" at
+ * /authorize with no clue as to why the client never got a new one.
+ */
+function dcrError(
+  res: Response,
+  status: number,
+  error: string,
+  description: string,
+  body?: unknown,
+): void {
+  logger.warn(
+    {
+      status,
+      error,
+      description,
+      // A registration request carries no secrets, so this is safe to log —
+      // and it is the only way to see what a client actually asked for.
+      requested: summariseMetadata(body),
+    },
+    'DCR: registration rejected',
+  );
   res.status(status).json({ error, error_description: description });
+}
+
+function summariseMetadata(body: unknown): Record<string, unknown> | undefined {
+  if (!body || typeof body !== 'object') return undefined;
+  const b = body as Record<string, unknown>;
+  return {
+    client_name: b.client_name,
+    redirect_uris: b.redirect_uris,
+    token_endpoint_auth_method: b.token_endpoint_auth_method,
+    grant_types: b.grant_types,
+    response_types: b.response_types,
+  };
 }
 
 export function registerHandler(req: Request, res: Response): void {
   if (!req.is('application/json')) {
-    dcrError(res, 415, 'invalid_client_metadata', 'Content-Type must be application/json');
+    dcrError(
+      res,
+      415,
+      'invalid_client_metadata',
+      'Content-Type must be application/json',
+      req.body,
+    );
     return;
   }
 
@@ -60,21 +103,32 @@ export function registerHandler(req: Request, res: Response): void {
       400,
       'invalid_client_metadata',
       parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '),
+      req.body,
     );
     return;
   }
   const meta = parsed.data;
 
-  // No client secrets are issued, so a client claiming it will authenticate
-  // with one would be told a lie. Reject rather than silently downgrade.
+  // A client asking to authenticate with a secret gets registered anyway, as a
+  // public one, and is told so in the response.
+  //
+  // RFC 7591 §3.2.1 is explicit that the server may return metadata differing
+  // from the request and that the client must use what it gets back. Refusing
+  // instead — which is what this did — left clients that ask for
+  // `client_secret_basic` unable to register at all, and a client that then
+  // falls back to a cached client_id looks, from the server, exactly like one
+  // that never registered.
+  //
+  // Nothing is weakened by accepting: /token authenticates no client either
+  // way. PKCE is mandatory and is what actually binds the code to the caller.
   if (meta.token_endpoint_auth_method !== 'none') {
-    dcrError(
-      res,
-      400,
-      'invalid_client_metadata',
-      'Only public clients are supported (token_endpoint_auth_method must be "none")',
+    logger.info(
+      {
+        requested: meta.token_endpoint_auth_method,
+        clientName: meta.client_name,
+      },
+      'DCR: client asked for a confidential auth method — registering it as public (PKCE only)',
     );
-    return;
   }
 
   const client: RegisteredClient = {

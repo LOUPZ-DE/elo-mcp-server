@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **A client asking to authenticate with a secret could not register at all.**
+  `/register` refused anything but `token_endpoint_auth_method: "none"` with a
+  400. RFC 7591 §3.2.1 is explicit that the server may return metadata differing
+  from the request and that the client must use what it gets back, so refusing
+  was both unhelpful and unnecessary: such a client is now registered as public
+  and told so in the response. Nothing is weakened — `/token` authenticates no
+  client either way, and PKCE is mandatory and is what binds the code to the
+  caller.
+
+  The symptom this produced was badly misleading. A client that cannot register
+  falls back to a `client_id` it cached earlier, which arrives at `/authorize`
+  as an unknown id — indistinguishable, from the server, from a client that
+  never tried to register.
+- **A rejected registration is now logged**, with the reason and the metadata
+  the client asked for. It was silent, which is why the above had to be
+  inferred rather than read.
 - **A rolling redeploy could undo the incoming instance's state.** Easypanel
   starts the replacement container before stopping the outgoing one — observed
   in production, the new instance read the state file two seconds *before* the
