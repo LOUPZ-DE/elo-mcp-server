@@ -5,7 +5,14 @@ import { renderErrorPage } from '../utils/html.js';
 import { renderLoginPage } from '../authn/loginPage.js';
 import { getSession, setSession, clearSession } from '../authn/session.js';
 import { EloLoginError, getEloSession, loginElo } from '../authn/eloLogin.js';
-import { getClient, getPendingAuth, pendingAuths, PENDING_TTL_MS, type PendingAuth } from './store.js';
+import {
+  clientCount,
+  getClient,
+  getPendingAuth,
+  pendingAuths,
+  PENDING_TTL_MS,
+  type PendingAuth,
+} from './store.js';
 import { randomToken } from './pkce.js';
 import { completeAuthorization } from './complete.js';
 
@@ -56,6 +63,14 @@ export function authorizeGetHandler(req: Request, res: Response): void {
   }
   const client = getClient(clientId);
   if (!client) {
+    // Logged because this is the one failure the client cannot see: the page
+    // renders in the user's browser, so without a line here an operator has no
+    // evidence it happened at all, let alone which id was presented. A stale id
+    // after a restart looks identical to a client that never registered.
+    logger.warn(
+      { clientId, knownClients: clientCount(), notionUserId },
+      'Authorize rejected: unknown client_id — the client is presenting a registration this server does not have',
+    );
     renderErrorPage(
       res,
       400,

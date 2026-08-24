@@ -224,3 +224,8 @@ registerSlice<OAuthState>({
     );
   },
 });
+
+/** How many registrations this process knows about. Diagnostics only. */
+export function clientCount(): number {
+  return clients.size;
+}

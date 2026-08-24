@@ -32,7 +32,7 @@ import { classifyLoginError, isStaleCredentialError, resetEloSessions } from '..
 import { zipSync, strToU8 } from 'fflate';
 import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -1345,6 +1345,48 @@ test('flushState writes immediately, without waiting for the timer', () => {
       decryptState(readFileSync(file, 'utf8'), decodeStateKey(key)),
     );
     assert.deepEqual(payload.slices.demo, { n: 7 });
+  } finally {
+    setConfig(previous);
+    resetSlices();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a shutdown flush does not overwrite a newer instance’s state', async () => {
+  // The rolling-redeploy case, observed in production: the replacement
+  // container boots and reads the file, then the outgoing one receives SIGTERM.
+  // Its full-state write would undo whatever the successor had already saved.
+  resetSlices();
+  const dir = mkdtempSync(join(tmpdir(), 'elo-mcp-handover-'));
+  const file = join(dir, 'state.json');
+  const key = randomBytes(32).toString('base64url');
+  const previous = config();
+  setConfig({ ...previous, STATE_FILE: file, STATE_ENCRYPTION_KEY: key });
+  try {
+    registerSlice<{ who: string }>({
+      name: 'demo',
+      serialise: () => ({ who: 'departing' }),
+      parse: (data) => z.object({ who: z.string() }).parse(data),
+      apply: () => {},
+    });
+    // The departing instance writes once, so it owns the file.
+    flushState();
+    const successor = encryptState(
+      JSON.stringify({ v: 1, slices: { demo: { who: 'successor' } } }),
+      decodeStateKey(key),
+    );
+    // mtime has a coarse resolution on some filesystems; make the change visible.
+    await new Promise((r) => setTimeout(r, 20));
+    writeFileSync(file, successor, 'utf8');
+
+    flushState({ shutdown: true });
+    const after = JSON.parse(decryptState(readFileSync(file, 'utf8'), decodeStateKey(key)));
+    assert.equal(after.slices.demo.who, 'successor');
+
+    // A normal save is still authoritative — only the shutdown path defers.
+    flushState();
+    const normal = JSON.parse(decryptState(readFileSync(file, 'utf8'), decodeStateKey(key)));
+    assert.equal(normal.slices.demo.who, 'departing');
   } finally {
     setConfig(previous);
     resetSlices();

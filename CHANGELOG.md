@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **A rolling redeploy could undo the incoming instance's state.** Easypanel
+  starts the replacement container before stopping the outgoing one — observed
+  in production, the new instance read the state file two seconds *before* the
+  old one flushed on `SIGTERM`. Because every save rewrites everything, that
+  final flush would overwrite whatever the successor had already registered.
+  The shutdown flush now compares the file's mtime against this process's last
+  write and stands down when a newer instance owns it. Normal saves are
+  unaffected and remain authoritative.
+- **An unknown `client_id` at `/authorize` is now logged.** It was the one
+  failure with no trace anywhere: the page renders in the user's browser, so the
+  client never sees it, and the server said nothing either. A stale registration
+  after a restart and a client that never registered look identical from the
+  outside; the log line names the id and how many registrations the process
+  holds, which tells the two apart.
+
 ### Added
 - **Encrypted state persistence (`STATE_FILE`, `STATE_ENCRYPTION_KEY`).**
   Registrations, refresh tokens and signed-in ELO sessions now survive a
