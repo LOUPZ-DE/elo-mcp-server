@@ -25,6 +25,10 @@ Testgruppe-Info.md
 # PR description drafted for the maintainer; not part of the published repo.
 PR-Beschreibung.md
 
+# As-built description of the authentication layer, written for our own records.
+# Names internal groups and accounts; the public-facing version is docs/oauth-dcr.md.
+OAuth-Ist-Beschreibung.md
+
 # GitHub issue drafted locally before being filed; the issue itself is the
 # published artefact, not this file.
 Issue-Encrypted-State.md
