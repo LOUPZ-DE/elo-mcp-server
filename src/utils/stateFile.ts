@@ -4,7 +4,7 @@ import {
   randomBytes,
   timingSafeEqual,
 } from 'node:crypto';
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { logger } from './logger.js';
 import { config } from './runtimeConfig.js';
@@ -22,8 +22,12 @@ import { config } from './runtimeConfig.js';
 // is a single AES-256-GCM message and not the plain JSON the reference
 // implementation writes.
 //
-// Single instance only. Every save rewrites the complete state, so two replicas
-// sharing a volume would take turns discarding each other's work.
+// Single instance at a time — but note that "at a time" still overlaps during a
+// rolling redeploy, when the replacement container boots before the outgoing
+// one is stopped. Observed in production: the new instance read the file two
+// seconds before the old one flushed on SIGTERM. Every save rewrites everything,
+// so without the handover guard below the departing container would clobber
+// whatever its successor had already registered.
 
 const STATE_VERSION = 1;
 /** Bound into the AEAD so an envelope from another version cannot be replayed. */
@@ -219,6 +223,9 @@ export function loadState(): void {
   }
 
   for (const { slice, value } of staged) slice.apply(value);
+  // Whatever we just read is the version we are accountable for; a later
+  // change to it means somebody else wrote.
+  ownMtimeMs = currentMtimeMs();
   logger.info(
     { stateFile: file, slices: staged.map((s) => s.slice.name) },
     'State restored',
@@ -248,13 +255,49 @@ export function scheduleSave(): void {
   }, SAVE_DELAY_MS);
 }
 
-/** Write immediately, cancelling any pending save. Safe to call when disabled. */
-export function flushState(): void {
+/**
+ * Write immediately, cancelling any pending save. Safe to call when disabled.
+ *
+ * `shutdown` marks the flush as a departing instance's last act. During a
+ * rolling redeploy the successor is already running, so if the file has moved
+ * on since we last touched it, the newer instance owns it and writing our full
+ * state over theirs would undo their work.
+ */
+export function flushState(opts: { shutdown?: boolean } = {}): void {
   if (saveTimer) {
     clearTimeout(saveTimer);
     saveTimer = null;
   }
-  if (enabled()) saveNow();
+  if (!enabled()) return;
+  if (opts.shutdown && changedUnderUs()) {
+    logger.warn(
+      { stateFile: config().STATE_FILE },
+      'State file has been written by another instance — skipping the shutdown flush so the newer one keeps its state',
+    );
+    return;
+  }
+  saveNow();
+}
+
+/** mtime of the state file, or null when it does not exist / cannot be read. */
+function currentMtimeMs(): number | null {
+  const file = config().STATE_FILE;
+  if (!file) return null;
+  try {
+    return statSync(file).mtimeMs;
+  } catch {
+    return null;
+  }
+}
+
+/** Last mtime we are responsible for — set when we load and after every write. */
+let ownMtimeMs: number | null = null;
+
+function changedUnderUs(): boolean {
+  const onDisk = currentMtimeMs();
+  if (onDisk === null) return false; // nothing there to overwrite
+  if (ownMtimeMs === null) return true; // it appeared without us writing it
+  return onDisk !== ownMtimeMs;
 }
 
 function saveNow(): void {
@@ -281,6 +324,7 @@ function saveNow(): void {
     writeFileSync(tmp, envelope, { encoding: 'utf8', mode: 0o600 });
     // Atomic within the directory: a reader sees the old file or the new one.
     renameSync(tmp, file);
+    ownMtimeMs = currentMtimeMs();
     logger.debug({ stateFile: file, bytes: envelope.length }, 'State written');
   } catch (err) {
     logger.error(

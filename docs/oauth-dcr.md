@@ -206,6 +206,14 @@ Every save writes the complete state, so two replicas on one volume would take
 turns discarding each other's registrations. The server logs this requirement
 at boot whenever persistence is on.
 
+One instance *at a time* still overlaps during a rolling redeploy: the
+replacement boots before the outgoing container is stopped. Observed in
+production, the new instance read the file two seconds before the old one
+flushed on `SIGTERM`. The shutdown flush therefore checks first — if the file
+has moved on since this process last wrote it, the newer instance owns it and
+the flush stands down instead of overwriting. In the log that reads
+`skipping the shutdown flush`, and it is the correct outcome, not a failure.
+
 ## Client setup
 
 ### Notion

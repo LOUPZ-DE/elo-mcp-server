@@ -570,7 +570,9 @@ process.on('uncaughtException', (err) => {
 
 function safeFlush(): void {
   try {
-    flushState();
+    // Marked as a shutdown flush: during a rolling redeploy the replacement is
+    // already up, and writing our full state over the newer one's would undo it.
+    flushState({ shutdown: true });
   } catch (err) {
     logger.error({ err }, 'Final state flush failed');
   }
