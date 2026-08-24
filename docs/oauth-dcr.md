@@ -130,10 +130,8 @@ display name and the opaque `elo_sid` handle — never the password.
 
 Consequences worth knowing before you deploy:
 
-- **A restart logs everyone out.** Registrations, refresh tokens and sessions
-  are all in memory. Clients re-register automatically; users see the login form
-  again. Persisting this needs encryption at rest and is tracked separately in
-  [#4](https://github.com/LOUPZ-DE/elo-mcp-server/issues/4).
+- **Without `STATE_FILE`, a restart logs everyone out** — and worse, leaves
+  clients stuck. See "Surviving a redeploy" below; configure it.
 - **An expired session is a 401, never a downgrade.** When a token's session is
   gone, the request is refused. It is never quietly served under the technical
   account — that would hand someone permissions they never had.
@@ -143,6 +141,70 @@ Consequences worth knowing before you deploy:
   (default 50) and `ELO_USER_SESSION_TTL` (default 8 h idle). Because IX reaps
   its own sessions after ~10 minutes and this server re-logins lazily, only
   *concurrently active* users occupy licences.
+
+## Surviving a redeploy
+
+Configure this. Without it, every deploy strands your users.
+
+```bash
+STATE_FILE=/data/state.json
+STATE_ENCRYPTION_KEY=<32 bytes, different from the two secrets above>
+```
+
+Easypanel: mount a volume at `/data`. The image creates the directory owned by
+the `node` user, so a *named* volume works out of the box. A *bind mount* keeps
+the host directory's ownership — if that is root, the server refuses to start
+rather than discovering the problem at the next restart, when the state would
+already be gone.
+
+### Why it matters more than it looks
+
+Registrations, refresh tokens and signed-in sessions all live in memory. Losing
+the refresh tokens and sessions is recoverable on its own: the client gets a 401
+from `/mcp` and runs the flow again.
+
+Losing the **registrations** is not. A client that stored its `client_id` —
+Notion and claude.ai both do — presents it at `/authorize` and gets
+
+> Diese Anwendung ist nicht (mehr) registriert.
+
+on an error page that renders **in the browser**. The client never sees it, so
+nothing re-registers. Somebody has to delete and re-add the connector, after
+every single deploy.
+
+### What is in the file
+
+`clients`, `refreshTokens`, and the credential vault — ELO user names and
+passwords. Authorization codes and half-finished logins are not: both expire
+faster than a restart takes.
+
+The whole file is one AES-256-GCM message. GCM because it is AEAD: a tampered
+file fails authentication instead of loading quietly. Written `0600` into a
+`0700` directory, via a temp file and an atomic rename, one second after the
+first change in a burst — and flushed immediately on `SIGTERM`, which is what a
+redeploy sends.
+
+**The trade-off, stated plainly:** real ELO passwords now sit encrypted on a
+volume. Whoever holds both the file and the key holds the accounts. Treat
+`STATE_ENCRYPTION_KEY` like the passwords it protects, and keep it out of the
+same place you keep backups of the volume.
+
+### Keys
+
+Separate from `OAUTH_TOKEN_SECRET` and `OAUTH_SESSION_SECRET`, and the server
+refuses to start if you reuse either — leaking a signing key must not also hand
+over the vault.
+
+Rotating the key makes the existing file unreadable. That is not destructive:
+it is renamed to `state.json.unreadable-<timestamp>` and the server starts
+empty, so clients re-register and users sign in once. Restore the old key and
+rename the file back if the rotation was a mistake.
+
+### One instance only
+
+Every save writes the complete state, so two replicas on one volume would take
+turns discarding each other's registrations. The server logs this requirement
+at boot whenever persistence is on.
 
 ## Client setup
 
@@ -206,4 +268,5 @@ Deliberate, and worth stating plainly:
   whether to send the origin, the `/mcp` URL, or neither, and rejecting the
   flow over it would be an opaque dead end. The audience minted is always
   `PUBLIC_BASE_URL/mcp` regardless, so this cannot widen a token.
-- **No state persistence.** See above, and [#4](https://github.com/LOUPZ-DE/elo-mcp-server/issues/4).
+- **State persistence assumes one instance**, and is off unless `STATE_FILE`
+  is configured. See "Surviving a redeploy".

@@ -1,4 +1,6 @@
 import axios from 'axios';
+import { z } from 'zod';
+import { registerSlice, scheduleSave } from '../utils/stateFile.js';
 import { EloClient } from '../elo/client.js';
 import { runFind, findInFolder } from '../elo/find.js';
 import { logger } from '../utils/logger.js';
@@ -59,7 +61,46 @@ export interface EloUserSession {
   lastUsed: number;
 }
 
-const sessions = new Map<string, EloUserSession>();
+/**
+ * What the vault actually stores.
+ *
+ * The password lives here rather than only inside `EloClient` because an
+ * `EloClient` is not serialisable — it owns an axios instance, a session cookie
+ * and a login timestamp. Persisting the vault therefore means persisting the
+ * credentials and rebuilding the client from them.
+ */
+interface VaultEntry {
+  sid: string;
+  userName: string;
+  password: string;
+  displayName: string;
+  createdAt: number;
+  lastUsed: number;
+  /** Built on first use. Absent right after a restore from the state file. */
+  client?: EloClient;
+}
+
+const sessions = new Map<string, VaultEntry>();
+
+/**
+ * Hand out a session with a live client, building it if this is the first use.
+ *
+ * Restoring does not log in to ELO — N users would mean N simultaneous logins
+ * at boot. The existing machinery covers it instead: `ensureSession()` logs in
+ * on the first call, and if the password changed in the meantime
+ * `isStaleCredentialError` drops the session and the user signs in again.
+ */
+function materialise(entry: VaultEntry): EloUserSession {
+  const client = (entry.client ??= clientForUser(entry.userName, entry.password));
+  return {
+    sid: entry.sid,
+    userName: entry.userName,
+    displayName: entry.displayName,
+    client,
+    createdAt: entry.createdAt,
+    lastUsed: entry.lastUsed,
+  };
+}
 
 function idleTtlMs(): number {
   return config().ELO_USER_SESSION_TTL * 1000;
@@ -202,20 +243,22 @@ export async function loginElo(userName: string, password: string): Promise<EloU
 
   evictToFit();
   const now = Date.now();
-  const session: EloUserSession = {
+  const entry: VaultEntry = {
     sid: randomToken(24),
     userName,
+    password,
     displayName,
     client,
     createdAt: now,
     lastUsed: now,
   };
-  sessions.set(session.sid, session);
+  sessions.set(entry.sid, entry);
+  scheduleSave();
   logger.info(
     { userName, sessions: sessions.size },
     'ELO user session opened',
   );
-  return session;
+  return materialise(entry);
 }
 
 /**
@@ -226,22 +269,28 @@ export async function loginElo(userName: string, password: string): Promise<EloU
  * the latter would silently hand a user permissions they do not have.
  */
 export function getEloSession(sid: string): EloUserSession | undefined {
-  const session = sessions.get(sid);
-  if (!session) return undefined;
-  if (Date.now() - session.lastUsed > idleTtlMs()) {
+  const entry = sessions.get(sid);
+  if (!entry) return undefined;
+  if (Date.now() - entry.lastUsed > idleTtlMs()) {
     sessions.delete(sid);
-    logger.info({ userName: session.userName }, 'ELO user session expired (idle)');
+    scheduleSave();
+    logger.info({ userName: entry.userName }, 'ELO user session expired (idle)');
     return undefined;
   }
-  session.lastUsed = Date.now();
-  return session;
+  entry.lastUsed = Date.now();
+  // `lastUsed` moves on every call; persisting each one would write the file
+  // on every tool invocation. The sweep and the explicit mutations below carry
+  // it instead, so a restored session may look slightly older than it is —
+  // which only ever expires it sooner, never later.
+  return materialise(entry);
 }
 
 export function dropEloSession(sid: string): void {
-  const session = sessions.get(sid);
-  if (!session) return;
+  const entry = sessions.get(sid);
+  if (!entry) return;
   sessions.delete(sid);
-  logger.info({ userName: session.userName }, 'ELO user session dropped');
+  scheduleSave();
+  logger.info({ userName: entry.userName }, 'ELO user session dropped');
 }
 
 /**
@@ -271,6 +320,7 @@ function evictToFit(): void {
     }
     if (!oldestSid) break;
     sessions.delete(oldestSid);
+    scheduleSave();
     logger.warn({ max }, 'ELO session cap reached — evicted the least recently used session');
   }
 }
@@ -295,9 +345,48 @@ export function startEloSessionSweep(): NodeJS.Timeout {
       }
     }
     if (removed > 0) {
+      scheduleSave();
       logger.info({ removed, remaining: sessions.size }, 'ELO user sessions swept');
     }
   }, SWEEP_INTERVAL_MS);
   timer.unref();
   return timer;
 }
+
+// --- Persistence -------------------------------------------------------------
+
+const VaultEntrySchema = z.object({
+  sid: z.string().min(1),
+  userName: z.string().min(1),
+  password: z.string(),
+  displayName: z.string(),
+  createdAt: z.number(),
+  lastUsed: z.number(),
+});
+
+type StoredVault = z.infer<typeof VaultEntrySchema>[];
+
+registerSlice<StoredVault>({
+  name: 'eloSessions',
+  // `client` is destructured away deliberately: an EloClient holds an axios
+  // instance, which JSON.stringify would either choke on or splatter across
+  // the file.
+  serialise: () =>
+    [...sessions.values()].map(({ client: _client, ...entry }) => entry),
+  parse: (data) => z.array(VaultEntrySchema).parse(data),
+  apply: (entries) => {
+    const cutoff = Date.now() - idleTtlMs();
+    let expired = 0;
+    for (const entry of entries) {
+      if (entry.lastUsed < cutoff) {
+        expired++;
+        continue;
+      }
+      sessions.set(entry.sid, entry);
+    }
+    logger.info(
+      { sessions: sessions.size, expiredSkipped: expired },
+      'ELO user sessions restored — clients will re-login to IX on first use',
+    );
+  },
+});

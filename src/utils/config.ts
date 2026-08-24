@@ -1,5 +1,8 @@
 import 'dotenv/config';
+import { isAbsolute } from 'node:path';
 import { z } from 'zod';
+import { logger } from './logger.js';
+import { decodeStateKey, secretsMatch } from './stateFile.js';
 
 const ConfigSchema = z.object({
   ELO_BASE_URL: z.string().url(),
@@ -83,6 +86,16 @@ const ConfigSchema = z.object({
   // (RFC 7591), so without a cap anyone can grow the map without bound.
   OAUTH_MAX_CLIENTS: z.coerce.number().int().positive().default(500),
 
+  // --- Encrypted state persistence ------------------------------------------
+  // Absolute path to the state file. Without it the server runs purely in
+  // memory and every restart drops the DCR registrations, the refresh tokens
+  // and every signed-in ELO session.
+  STATE_FILE: z.string().min(1).optional(),
+  // 32 bytes, hex or base64url. Mandatory whenever STATE_FILE is set — the
+  // file holds ELO credentials, so there is no plaintext fallback.
+  //   node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
+  STATE_ENCRYPTION_KEY: z.string().min(1).optional(),
+
   // --- Per-user ELO sessions (OAuth only) -----------------------------------
   // How long an idle user session survives before its credentials are dropped
   // from memory. Expiry sends the client back through the login widget.
@@ -145,6 +158,39 @@ export function loadConfig(): Config {
         `MCP_AUTH_MODE=${data.MCP_AUTH_MODE} requires: ${missing.join(', ')}.\n` +
           'Generate the secrets with:\n' +
           '  node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64url\'))"',
+      );
+    }
+  }
+
+  if (data.STATE_FILE) {
+    if (!isAbsolute(data.STATE_FILE)) {
+      throw new Error(`STATE_FILE must be an absolute path (got "${data.STATE_FILE}").`);
+    }
+    // No silent plaintext fallback: the file holds ELO user names and
+    // passwords, and a half-configured deployment must not write those to a
+    // volume in the clear.
+    if (!data.STATE_ENCRYPTION_KEY) {
+      throw new Error(
+        'STATE_ENCRYPTION_KEY is required when STATE_FILE is set — the state file holds ELO credentials.\n' +
+          'Generate one with:\n' +
+          '  node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64url\'))"',
+      );
+    }
+    // Fails here rather than at the first write, when it would only be a log line.
+    decodeStateKey(data.STATE_ENCRYPTION_KEY);
+    // One key per purpose: leaking the token signing key must not also hand
+    // over the credential vault.
+    for (const [name, other] of [
+      ['OAUTH_TOKEN_SECRET', data.OAUTH_TOKEN_SECRET],
+      ['OAUTH_SESSION_SECRET', data.OAUTH_SESSION_SECRET],
+    ] as const) {
+      if (other && secretsMatch(data.STATE_ENCRYPTION_KEY, other)) {
+        throw new Error(`STATE_ENCRYPTION_KEY must differ from ${name}.`);
+      }
+    }
+    if (!oauthEnabled) {
+      logger.warn(
+        'STATE_FILE is set but MCP_AUTH_MODE=shared — there is no OAuth state to persist.',
       );
     }
   }

@@ -1,17 +1,20 @@
+import { z } from 'zod';
 import { logger } from '../utils/logger.js';
 import { config } from '../utils/runtimeConfig.js';
+import { registerSlice, scheduleSave } from '../utils/stateFile.js';
 import type { AuthnIdentity } from '../authn/identity.js';
 
-// All authorization-server state lives here, in memory.
+// Authorization-server state. Held in memory and, when STATE_FILE is
+// configured, mirrored into an encrypted file so a redeploy does not wipe it.
 //
-// That is a deliberate first step, not an oversight: refresh-token records and
-// the identities attached to them are the index into the credential vault, and
-// writing them to a plain file — as the reference implementation does — would
-// put a map of live ELO sessions on the container's disk. Encrypted persistence
-// is tracked in issue #4; see docs/oauth-dcr.md.
+// The registrations are what made persistence necessary: a client that stored
+// its client_id — Notion and claude.ai both do — hits an error page at
+// /authorize after a restart, and because that page renders in the browser
+// rather than reaching the client, nothing recovers on its own.
 //
-// Consequence to keep in mind: a redeploy drops every registration and every
-// session, so clients re-register and users log in again.
+// Refresh tokens ride along because they are only useful while the ELO session
+// behind them is alive, and that session is persisted too. Authorization codes
+// and pending logins are not: both expire faster than a restart takes.
 
 /** A client that registered itself via RFC 7591. Public clients only. */
 export interface RegisteredClient {
@@ -93,7 +96,12 @@ export function getAuthCode(code: string): AuthCode | undefined {
 }
 
 export function getRefreshToken(token: string): RefreshToken | undefined {
-  return getLive(refreshTokens, token);
+  const before = refreshTokens.size;
+  const found = getLive(refreshTokens, token);
+  // getLive drops the entry when it has expired; persist that removal so a
+  // spent token cannot come back from the file after a restart.
+  if (refreshTokens.size !== before) scheduleSave();
+  return found;
 }
 
 export function getClient(clientId: string): RegisteredClient | undefined {
@@ -123,6 +131,7 @@ export function addClient(client: RegisteredClient): void {
     logger.warn({ clientId: oldestId, max }, 'DCR client cap reached — evicted oldest registration');
   }
   clients.set(client.client_id, client);
+  scheduleSave();
 }
 
 function sweepExpired<T extends Expiring>(map: Map<string, T>): number {
@@ -143,13 +152,75 @@ function sweepExpired<T extends Expiring>(map: Map<string, T>): number {
  */
 export function startStoreSweep(): NodeJS.Timeout {
   const timer = setInterval(() => {
-    const removed =
-      sweepExpired(pendingAuths) + sweepExpired(authCodes) + sweepExpired(refreshTokens);
-    if (removed > 0) {
-      logger.debug({ removed }, 'OAuth store sweep');
+    const ephemeral = sweepExpired(pendingAuths) + sweepExpired(authCodes);
+    const persisted = sweepExpired(refreshTokens);
+    if (persisted > 0) scheduleSave();
+    if (ephemeral + persisted > 0) {
+      logger.debug({ removed: ephemeral + persisted }, 'OAuth store sweep');
     }
   }, SWEEP_INTERVAL_MS);
   // Never hold the process open just to run a cleanup timer.
   timer.unref();
   return timer;
 }
+
+// --- Persistence -------------------------------------------------------------
+
+const RegisteredClientSchema = z.object({
+  client_id: z.string().min(1),
+  client_id_issued_at: z.number(),
+  client_name: z.string().optional(),
+  redirect_uris: z.array(z.string()).min(1),
+  grant_types: z.array(z.string()),
+  response_types: z.array(z.string()),
+  token_endpoint_auth_method: z.literal('none'),
+  scope: z.string().optional(),
+});
+
+const AuthnIdentitySchema = z.object({
+  userName: z.string().min(1),
+  displayName: z.string(),
+  idp: z.string(),
+  eloSid: z.string().min(1),
+});
+
+const RefreshTokenSchema = z.object({
+  clientId: z.string().min(1),
+  scope: z.string().optional(),
+  resource: z.string().optional(),
+  notionUserId: z.string().optional(),
+  identity: AuthnIdentitySchema,
+  expiresAt: z.number(),
+});
+
+const OAuthStateSchema = z.object({
+  clients: z.array(z.tuple([z.string(), RegisteredClientSchema])),
+  refreshTokens: z.array(z.tuple([z.string(), RefreshTokenSchema])),
+});
+
+type OAuthState = z.infer<typeof OAuthStateSchema>;
+
+// Validated rather than cast. The file is encrypted and authenticated, so a
+// mismatch here means our own format drifted — but a blind cast would turn that
+// into confusing failures much later, and this is cheap.
+registerSlice<OAuthState>({
+  name: 'oauth',
+  serialise: () => ({
+    clients: [...clients],
+    refreshTokens: [...refreshTokens],
+  }),
+  parse: (data) => OAuthStateSchema.parse(data),
+  apply: (state) => {
+    for (const [id, client] of state.clients) clients.set(id, client);
+    const now = Date.now();
+    let expired = 0;
+    for (const [token, record] of state.refreshTokens) {
+      if (record.expiresAt > now) refreshTokens.set(token, record);
+      else expired++;
+    }
+    logger.info(
+      { clients: clients.size, refreshTokens: refreshTokens.size, expiredSkipped: expired },
+      'OAuth state restored',
+    );
+  },
+});

@@ -39,6 +39,7 @@ import {
 } from './authn/eloLogin.js';
 import { corsMiddleware } from './utils/cors.js';
 import { rateLimit } from './utils/rateLimit.js';
+import { ensureStateWritable, flushState, loadState } from './utils/stateFile.js';
 
 let cfg: ReturnType<typeof loadConfig>;
 try {
@@ -52,6 +53,32 @@ try {
 // Publish it before anything else imports it — the OAuth and authn modules all
 // read the config back from here rather than parsing the environment again.
 setConfig(cfg);
+
+// State persistence, if configured. Both calls have to happen after setConfig
+// and after the imports above, which is where the slices register themselves.
+if (cfg.STATE_FILE) {
+  try {
+    // Fail here rather than in a swallowed catch on the first write. A bind
+    // mount owned by root gives the `node` user EACCES, and discovering that
+    // at the next restart means discovering it after the state is already lost.
+    ensureStateWritable();
+  } catch (err) {
+    process.stderr.write(
+      `State file directory is not writable: ${err instanceof Error ? err.message : String(err)}\n` +
+        `Check the volume mounted at ${cfg.STATE_FILE}. On a bind mount the host directory's ` +
+        'owner wins, so it must be writable by uid 1000 (the container\'s `node` user).\n',
+    );
+    process.exit(1);
+  }
+  loadState();
+  // Worth stating once at boot rather than only in the docs: every save writes
+  // the complete state, so a second replica on the same volume would discard
+  // whatever the first one registered.
+  logger.info(
+    { stateFile: cfg.STATE_FILE },
+    'Encrypted state persistence is active — this requires a single instance',
+  );
+}
 
 /**
  * The technical account. Used for stdio, for shared-secret callers, and as the
@@ -515,6 +542,7 @@ async function startHttp() {
         port: cfg.MCP_HTTP_PORT,
         authMode: cfg.MCP_AUTH_MODE,
         ...(cfg.oauthEnabled ? { issuer: cfg.PUBLIC_BASE_URL } : {}),
+        state: cfg.STATE_FILE ? `encrypted at ${cfg.STATE_FILE}` : 'in-memory (lost on restart)',
       },
       'ELO MCP server listening on HTTP',
     );
@@ -536,8 +564,31 @@ process.on('unhandledRejection', (reason) => {
 });
 process.on('uncaughtException', (err) => {
   logger.fatal({ err }, 'Uncaught exception');
+  safeFlush();
   process.exit(1);
 });
+
+function safeFlush(): void {
+  try {
+    flushState();
+  } catch (err) {
+    logger.error({ err }, 'Final state flush failed');
+  }
+}
+
+// Without this the pending save — up to a second of registrations, tokens and
+// sessions — is discarded when the container stops, which is exactly the moment
+// the state file exists for. A redeploy sends SIGTERM.
+let shuttingDown = false;
+function shutdown(signal: NodeJS.Signals): void {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  logger.info({ signal }, 'Shutting down');
+  safeFlush();
+  process.exit(0);
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
 
 main().catch((err) => {
   logger.fatal({ err: err instanceof Error ? err.message : err }, 'Fatal startup error');
