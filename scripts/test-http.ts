@@ -13,7 +13,10 @@ import { setTimeout as sleep } from 'node:timers/promises';
 const PORT = Number(process.env.TEST_HTTP_PORT ?? 13000);
 const SECRET = 'test-' + Math.random().toString(36).slice(2);
 const BASE = `http://127.0.0.1:${PORT}`;
-const BOOT_TIMEOUT_MS = 8_000;
+// 8 s was occasionally too short on Windows when the run follows a fresh `tsc`
+// and the virus scanner is still reading dist/. A slow boot is not a failure
+// worth reporting; a crashed one is, and waitForBoot now tells them apart.
+const BOOT_TIMEOUT_MS = 25_000;
 
 let failures = 0;
 
@@ -53,9 +56,15 @@ function jsonRpc(method: string, params: unknown, id: number, auth = SECRET): Pr
   });
 }
 
-async function waitForBoot(): Promise<boolean> {
+/** Resolves once /health answers, or with the reason it never will. */
+async function waitForBoot(child: ChildProcess): Promise<true | string> {
   const deadline = Date.now() + BOOT_TIMEOUT_MS;
   while (Date.now() < deadline) {
+    // A server that exited will never answer, so stop waiting on it and report
+    // the exit code — otherwise a crash on startup looks exactly like slowness.
+    if (child.exitCode !== null) {
+      return `the server exited with code ${child.exitCode} before serving /health`;
+    }
     try {
       const r = await fetch(`${BASE}/health`);
       if (r.status === 200) return true;
@@ -64,7 +73,7 @@ async function waitForBoot(): Promise<boolean> {
     }
     await sleep(200);
   }
-  return false;
+  return `no response on /health within ${BOOT_TIMEOUT_MS / 1000}s`;
 }
 
 function stop(server: ChildProcess): Promise<void> {
@@ -104,9 +113,9 @@ async function main(): Promise<void> {
     },
   );
 
-  const booted = await waitForBoot();
-  if (!booted) {
-    console.error('Server did not respond on /health within the boot timeout.');
+  const booted = await waitForBoot(server);
+  if (booted !== true) {
+    console.error(`Server did not start: ${booted}.`);
     await stop(server);
     process.exit(1);
   }
