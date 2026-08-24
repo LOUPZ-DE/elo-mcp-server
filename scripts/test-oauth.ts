@@ -13,6 +13,9 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const IX_PORT = Number(process.env.TEST_IX_PORT ?? 13401);
 const MCP_PORT = Number(process.env.TEST_OAUTH_PORT ?? 13402);
@@ -22,6 +25,12 @@ const BASE = `http://127.0.0.1:${MCP_PORT}`;
 const BOOT_TIMEOUT_MS = 25_000;
 
 const SHARED_SECRET = 'shared-' + randomBytes(12).toString('base64url');
+const TOKEN_SECRET = randomBytes(32).toString('base64url');
+const SESSION_SECRET = randomBytes(32).toString('base64url');
+const STATE_KEY = randomBytes(32).toString('base64url');
+// A real directory, because the point is that this survives a process restart.
+const STATE_DIR = mkdtempSync(join(tmpdir(), 'elo-mcp-state-'));
+const STATE_FILE = join(STATE_DIR, 'state.json');
 const TECH_USER = 'elo-technical';
 const TECH_PASS = 'technical-pw';
 const END_USER = 'testuser';
@@ -221,11 +230,9 @@ async function newTxn(clientId: string, challenge: string, state: string): Promi
 
 // --- Main -------------------------------------------------------------------
 
-async function main(): Promise<void> {
-  await new Promise<void>((resolve) => ixServer.listen(IX_PORT, '127.0.0.1', resolve));
-  console.log(`Stub IX on :${IX_PORT}`);
-
-  const server = spawn(process.execPath, ['dist/index.js'], {
+/** Boot a server against the shared stub IX, optionally with a different key. */
+async function startServer(encryptionKey = STATE_KEY): Promise<ChildProcess> {
+  const child = spawn(process.execPath, ['dist/index.js'], {
     env: {
       ...process.env,
       MCP_TRANSPORT: 'http',
@@ -234,9 +241,13 @@ async function main(): Promise<void> {
       MCP_AUTH_MODE: 'both',
       MCP_SHARED_SECRET: SHARED_SECRET,
       PUBLIC_BASE_URL: BASE,
-      OAUTH_TOKEN_SECRET: randomBytes(32).toString('base64url'),
-      OAUTH_SESSION_SECRET: randomBytes(32).toString('base64url'),
+      // Fixed across restarts: a new signing key would invalidate every token
+      // for reasons unrelated to what these checks are about.
+      OAUTH_TOKEN_SECRET: TOKEN_SECRET,
+      OAUTH_SESSION_SECRET: SESSION_SECRET,
       OAUTH_ACCESS_TOKEN_TTL: '300',
+      STATE_FILE,
+      STATE_ENCRYPTION_KEY: encryptionKey,
       ELO_BASE_URL: `http://127.0.0.1:${IX_PORT}`,
       ELO_WEBCLIENT_URL: 'https://elo-link.example',
       ELO_USERNAME: TECH_USER,
@@ -245,11 +256,20 @@ async function main(): Promise<void> {
     },
     stdio: ['ignore', 'inherit', 'inherit'],
   });
+  const booted = await waitForBoot(child);
+  if (booted !== true) throw new Error(`MCP server did not start: ${booted}`);
+  return child;
+}
 
-  const booted = await waitForBoot(server);
-  if (booted !== true) {
-    console.error(`MCP server did not start: ${booted}.`);
-    await stop(server);
+async function main(): Promise<void> {
+  await new Promise<void>((resolve) => ixServer.listen(IX_PORT, '127.0.0.1', resolve));
+  console.log(`Stub IX on :${IX_PORT}`);
+
+  let server: ChildProcess;
+  try {
+    server = await startServer();
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
     ixServer.close();
     process.exit(1);
   }
@@ -548,9 +568,117 @@ async function main(): Promise<void> {
         !/name="txn"/.test(crossHtml)) ||
         `status ${cross.status}, location ${cross.headers.get('location')}`,
     );
+
+    // --- Surviving a redeploy ----------------------------------------------
+    //
+    // The regression this section exists for: before persistence, a restart
+    // dropped the DCR registrations, and a client that had stored its
+    // client_id — Notion and claude.ai both do — got "Diese Anwendung ist
+    // nicht (mehr) registriert" on an error page it never saw, so nothing
+    // recovered without a human re-adding the connector.
+    // Saves ride a one-second coalescing timer. Wait for it rather than lean
+    // on the shutdown flush: Windows does not deliver a real SIGTERM to a child
+    // killed from another process, so the handler never runs here. It does run
+    // in the container, and the check further down covers it where it can.
+    await sleep(1_400);
+    await stop(server);
+
+    let stateBytes: Buffer;
+    try {
+      stateBytes = readFileSync(STATE_FILE);
+      check('state is written to disk', true);
+    } catch {
+      stateBytes = Buffer.alloc(0);
+      check('state is written to disk', 'no state file was written');
+    }
+    check(
+      'the state file holds no plaintext credentials',
+      (stateBytes.length > 0 &&
+        !stateBytes.includes(END_USER_PW) &&
+        !stateBytes.includes(END_USER) &&
+        !stateBytes.includes(tokens.refresh_token)) ||
+        'the state file is empty or contains something that should have been encrypted',
+    );
+
+    server = await startServer();
+
+    const afterRestart = await fetch(
+      `${BASE}/authorize?client_id=${encodeURIComponent(clientId)}` +
+        `&redirect_uri=${encodeURIComponent(REDIRECT_URI)}` +
+        `&response_type=code&state=s&code_challenge=${pkcePair().challenge}` +
+        `&code_challenge_method=S256`,
+      { redirect: 'manual' },
+    );
+    const afterRestartHtml = await afterRestart.text();
+    check(
+      'a registration survives a restart',
+      (afterRestart.status === 200 && /name="txn"/.test(afterRestartHtml)) ||
+        `status ${afterRestart.status} — ` +
+          (afterRestartHtml.match(/<div class="error">([^<]*)</)?.[1] ?? 'no login form'),
+    );
+
+    const restartCallsBefore = ixCalls.length;
+    const afterRestartCall = await rpc(refreshedBody.access_token, 'tools/call', {
+      name: 'elo_search',
+      arguments: { query: 'Vertrag', maxResults: 1 },
+    });
+    const afterRestartBody = await afterRestartCall.text();
+    check(
+      'a token issued before the restart still works, with no new login',
+      (afterRestartCall.status === 200 && !afterRestartBody.includes('"isError":true')) ||
+        `status ${afterRestartCall.status}, body ${afterRestartBody.slice(0, 200)}`,
+    );
+    const restartSearches = ixCalls
+      .slice(restartCallsBefore)
+      .filter((c) => c.endpoint === 'findFirstSords');
+    check(
+      'and it still runs on the user session, not the technical account',
+      (restartSearches.length > 0 && restartSearches.every((c) => c.user === END_USER)) ||
+        `sessions used: ${restartSearches.map((c) => c.user).join(', ') || 'none'}`,
+    );
+
+    // --- Flush on shutdown --------------------------------------------------
+    //
+    // The reference implementation unrefs its save timer, so the last second
+    // before a redeploy is discarded — precisely what a state file is for.
+    // Only checkable where SIGTERM is real.
+    if (process.platform === 'win32') {
+      console.log('  SKIP shutdown flush — Windows does not deliver SIGTERM to a killed child');
+    } else {
+      const late = await fetch(`${BASE}/register`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ client_name: 'Late', redirect_uris: [REDIRECT_URI] }),
+      });
+      const lateClient = (await late.json()).client_id as string;
+      // No sleep: stop inside the coalescing window, so only the flush can save it.
+      await stop(server);
+      server = await startServer();
+      const lateAuth = await fetch(
+        `${BASE}/authorize?client_id=${encodeURIComponent(lateClient)}` +
+          `&redirect_uri=${encodeURIComponent(REDIRECT_URI)}` +
+          `&response_type=code&state=s&code_challenge=${pkcePair().challenge}` +
+          `&code_challenge_method=S256`,
+        { redirect: 'manual' },
+      );
+      check(
+        'a registration made just before shutdown is still flushed',
+        lateAuth.status === 200 || `status ${lateAuth.status}`,
+      );
+    }
+
+    // --- A wrong key must not destroy the file ------------------------------
+    await stop(server);
+    server = await startServer(randomBytes(32).toString('base64url'));
+    const parked = readdirSync(STATE_DIR).filter((f) => f.includes('.unreadable-'));
+    check(
+      'an unreadable state file is set aside rather than overwritten',
+      parked.length === 1 || `found ${parked.length} parked files: ${parked.join(', ')}`,
+    );
   } finally {
     await stop(server);
     ixServer.close();
+    rmSync(STATE_DIR, { recursive: true, force: true });
   }
 
   console.log(

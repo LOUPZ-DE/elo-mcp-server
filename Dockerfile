@@ -14,6 +14,17 @@ ENV NODE_ENV=production
 COPY package.json package-lock.json* ./
 RUN npm install --omit=dev && npm cache clean --force
 COPY --from=builder /app/dist ./dist
+
+# Home for the encrypted state file (STATE_FILE=/data/state.json), so DCR
+# registrations, refresh tokens and signed-in ELO sessions survive a redeploy.
+#
+# Runs as root, before USER below, so the directory belongs to `node` (uid 1000).
+# A *named* volume inherits that ownership; a *bind mount* does not — there the
+# host directory's owner wins, and the server will refuse to start rather than
+# discover the problem at the next restart, when the state would already be gone.
+RUN mkdir -p /data && chown -R node:node /data && chmod 700 /data
+VOLUME /data
+
 EXPOSE 3000
 USER node
 CMD ["node", "dist/index.js"]

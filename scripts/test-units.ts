@@ -30,6 +30,20 @@ import { setConfig, config } from '../src/utils/runtimeConfig.js';
 import { setSession, getSession } from '../src/authn/session.js';
 import { classifyLoginError, isStaleCredentialError, resetEloSessions } from '../src/authn/eloLogin.js';
 import { zipSync, strToU8 } from 'fflate';
+import { randomBytes } from 'node:crypto';
+import { z } from 'zod';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  decodeStateKey,
+  decryptState,
+  encryptState,
+  flushState,
+  registerSlice,
+  resetSlices,
+  scheduleSave,
+} from '../src/utils/stateFile.js';
 
 let failures = 0;
 let count = 0;
@@ -1225,6 +1239,133 @@ test('another IX rejection is not reported as a wrong password', () => {
 test('a stale-credential error is recognised so the session can be dropped', () => {
   assert.ok(isStaleCredentialError(new Error('ELO login rejected: [ELOIX:3008] …')));
   assert.ok(!isStaleCredentialError(new Error('ELO findFirstSords failed (HTTP 500)')));
+});
+
+section('State file — encryption');
+
+const stateKey = Buffer.from('0'.repeat(64), 'hex');
+
+test('a key round-trips through hex and base64url alike', () => {
+  const raw = randomBytes(32);
+  assert.ok(decodeStateKey(raw.toString('hex')).equals(raw));
+  assert.ok(decodeStateKey(raw.toString('base64url')).equals(raw));
+});
+
+test('a key of the wrong length is refused, with the length named', () => {
+  assert.throws(() => decodeStateKey(randomBytes(16).toString('base64url')), /32 bytes \(got 16\)/);
+});
+
+test('ciphertext round-trips', () => {
+  const plaintext = JSON.stringify({ hello: 'welt', zahl: 42 });
+  assert.equal(decryptState(encryptState(plaintext, stateKey), stateKey), plaintext);
+});
+
+test('the plaintext does not appear in the envelope', () => {
+  // The whole point: an operator with the volume must not read ELO passwords.
+  const envelope = encryptState(JSON.stringify({ password: 'hunter2' }), stateKey);
+  assert.ok(!envelope.includes('hunter2'));
+  assert.ok(!envelope.includes('password'));
+});
+
+test('two writes of the same data differ', () => {
+  // A fresh IV per write; identical envelopes would leak that nothing changed.
+  const a = encryptState('same', stateKey);
+  const b = encryptState('same', stateKey);
+  assert.notEqual(a, b);
+});
+
+test('the wrong key does not decrypt', () => {
+  const envelope = encryptState('geheim', stateKey);
+  assert.throws(() => decryptState(envelope, Buffer.from('1'.repeat(64), 'hex')));
+});
+
+test('a single flipped bit in the ciphertext is caught', () => {
+  // This is why GCM rather than a plain cipher: integrity, not just secrecy.
+  const envelope = JSON.parse(encryptState('geheim', stateKey));
+  const ct = Buffer.from(envelope.ct, 'base64url');
+  ct[0] ^= 0x01;
+  envelope.ct = ct.toString('base64url');
+  assert.throws(() => decryptState(JSON.stringify(envelope), stateKey));
+});
+
+test('a swapped IV is caught', () => {
+  const envelope = JSON.parse(encryptState('geheim', stateKey));
+  envelope.iv = randomBytes(12).toString('base64url');
+  assert.throws(() => decryptState(JSON.stringify(envelope), stateKey));
+});
+
+test('an envelope from another version is refused', () => {
+  const envelope = JSON.parse(encryptState('geheim', stateKey));
+  envelope.v = 2;
+  assert.throws(() => decryptState(JSON.stringify(envelope), stateKey), /version/i);
+});
+
+section('State file — slices');
+
+test('a slice round-trips through serialise, parse and apply', () => {
+  resetSlices();
+  let restored: string[] = [];
+  const source = ['a', 'b'];
+  registerSlice<string[]>({
+    name: 'demo',
+    serialise: () => source,
+    parse: (data) => z.array(z.string()).parse(data),
+    apply: (value) => void (restored = value),
+  });
+  // Mirrors what loadState does either side of the crypto.
+  const payload = JSON.stringify({ v: 1, slices: { demo: source } });
+  const parsed = JSON.parse(decryptState(encryptState(payload, stateKey), stateKey));
+  restored = z.array(z.string()).parse(parsed.slices.demo);
+  assert.deepEqual(restored, source);
+  resetSlices();
+});
+
+test('flushState writes immediately, without waiting for the timer', () => {
+  // Covers the logic behind the shutdown handler. Signal *delivery* can only
+  // be exercised where SIGTERM is real — see the skip in test-oauth.ts.
+  resetSlices();
+  const dir = mkdtempSync(join(tmpdir(), 'elo-mcp-unit-'));
+  const file = join(dir, 'state.json');
+  const key = randomBytes(32).toString('base64url');
+  const previous = config();
+  setConfig({ ...previous, STATE_FILE: file, STATE_ENCRYPTION_KEY: key });
+  try {
+    registerSlice<{ n: number }>({
+      name: 'demo',
+      serialise: () => ({ n: 7 }),
+      parse: (data) => z.object({ n: z.number() }).parse(data),
+      apply: () => {},
+    });
+    scheduleSave();
+    // Nothing on disk yet: the save is a second away.
+    assert.equal(existsSync(file), false);
+    flushState();
+    assert.equal(existsSync(file), true);
+    const payload = JSON.parse(
+      decryptState(readFileSync(file, 'utf8'), decodeStateKey(key)),
+    );
+    assert.deepEqual(payload.slices.demo, { n: 7 });
+  } finally {
+    setConfig(previous);
+    resetSlices();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a slice rejects data of the wrong shape', () => {
+  resetSlices();
+  let applied = false;
+  registerSlice<string[]>({
+    name: 'demo',
+    serialise: () => [],
+    parse: (data) => z.array(z.string()).parse(data),
+    apply: () => void (applied = true),
+  });
+  // parse throws before apply is ever reached — which is what keeps a bad
+  // slice from half-restoring the others.
+  assert.throws(() => z.array(z.string()).parse([1, 2, 3]));
+  assert.equal(applied, false);
+  resetSlices();
 });
 
 section('OAuth — browser session cookie');

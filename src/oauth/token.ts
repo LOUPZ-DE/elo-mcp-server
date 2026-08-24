@@ -4,6 +4,7 @@ import { config } from '../utils/runtimeConfig.js';
 import { getEloSession } from '../authn/eloLogin.js';
 import type { AuthnIdentity } from '../authn/identity.js';
 import { authCodes, getAuthCode, getRefreshToken, refreshTokens } from './store.js';
+import { scheduleSave } from '../utils/stateFile.js';
 import { randomToken, verifyS256 } from './pkce.js';
 import { signAccessToken } from './jwt.js';
 
@@ -51,6 +52,7 @@ async function issueTokenPair(res: Response, ctx: GrantContext): Promise<void> {
     identity: ctx.identity,
     expiresAt: Date.now() + cfg.OAUTH_REFRESH_TOKEN_TTL * 1000,
   });
+  scheduleSave();
 
   res.status(200).set('Cache-Control', 'no-store').json({
     access_token: accessToken,
@@ -137,12 +139,17 @@ export async function tokenHandler(req: Request, res: Response): Promise<void> {
       // client stops retrying and runs the authorization flow again, which is
       // what actually gets the user working.
       refreshTokens.delete(refreshToken);
+      scheduleSave();
       tokenError(res, 'invalid_grant', 'The ELO session has expired — please sign in again');
       return;
     }
 
     // Rotation: the presented token is spent, whatever happens next.
+    // Saved explicitly rather than relying on the save inside issueTokenPair —
+    // any future path that deletes without immediately re-issuing would
+    // otherwise leave a spent token alive in the file.
     refreshTokens.delete(refreshToken);
+    scheduleSave();
     logger.info({ clientId, userName: stored.identity.userName }, 'Token: refresh_token grant (rotated)');
     await issueTokenPair(res, {
       clientId,

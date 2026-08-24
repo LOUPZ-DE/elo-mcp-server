@@ -8,6 +8,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Encrypted state persistence (`STATE_FILE`, `STATE_ENCRYPTION_KEY`).**
+  Registrations, refresh tokens and signed-in ELO sessions now survive a
+  redeploy.
+
+  This fixes a real defect, not just an inconvenience. Losing the refresh
+  tokens and sessions was recoverable — the client gets a 401 from `/mcp` and
+  runs the flow again. Losing the *registrations* was not: a client that stored
+  its `client_id`, as Notion and claude.ai both do, presented it at
+  `/authorize` and got "Diese Anwendung ist nicht (mehr) registriert" on an
+  error page rendered **in the browser**. The client never saw it, so nothing
+  re-registered and somebody had to delete and re-add the connector — after
+  every single deploy.
+
+  The whole file is one AES-256-GCM message. GCM because it is AEAD: a tampered
+  file fails authentication rather than loading quietly, which matters because
+  the credential vault — ELO user names and passwords — is in there. Written
+  `0600` into a `0700` directory via a temp file and an atomic rename.
+  Authorization codes and half-finished logins are not persisted; both expire
+  faster than a restart takes.
+
+  Several things are deliberately stricter than the reference implementation
+  this borrows from. Its save timer is `unref()`'d and it registers no signal
+  handler, so the last second before a redeploy is discarded — exactly the case
+  a state file exists for; ours flushes on `SIGTERM`. It writes with the default
+  umask, landing at `0644` on plaintext credentials. It casts the parsed JSON
+  blindly and fills its maps *during* parsing, so a fault halfway leaves earlier
+  data applied while the log claims a fresh start; ours validates each slice
+  with zod and commits only after all of them parse. And an unreadable file is
+  moved aside as `<name>.unreadable-<timestamp>` rather than overwritten, so a
+  mistyped key costs a round of re-registration instead of the data.
+
+  Configuration refuses to start on the mistakes that matter: `STATE_FILE`
+  without a key, a relative path, a key that is not 32 bytes, or a key reused
+  from `OAUTH_TOKEN_SECRET`/`OAUTH_SESSION_SECRET`. Directory writability is
+  checked at boot rather than discovered in a swallowed catch at the first save.
+
+  **Requires a single instance** — every save rewrites the complete state, so a
+  second replica on the same volume would discard the first one's work. The
+  server says so at boot.
+
+### Changed
+- The credential vault stores the password on the session record and builds its
+  `EloClient` on first use. An `EloClient` owns an axios instance and a session
+  cookie and cannot be serialised, so persisting the vault meant persisting the
+  credentials and rebuilding from them. Restoring deliberately does not log in
+  to ELO — that would be N simultaneous logins at boot; the existing
+  `ensureSession()` path handles it on first use, and a password changed in the
+  meantime is caught by `isStaleCredentialError` as before.
+
+### Added
 - **Excel extraction (`.xlsx`, `.xlsm`).** `elo_get_document_content` now reads
   workbooks. Output is one block per sheet — a `Sheet: <name>` heading, then one
   line per row with cells joined by ` | `. Not tabs: the dispatcher's whitespace

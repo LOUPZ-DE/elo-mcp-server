@@ -81,6 +81,7 @@ See [`.env.example`](.env.example) for the complete list with comments.
 | `MCP_SHARED_SECRET` | Bearer token for the HTTP transport. Required unless `MCP_AUTH_MODE=oauth` |
 | `MCP_AUTH_MODE` | `shared` (default), `oauth` or `both`. See [OAuth 2.1 + DCR](docs/oauth-dcr.md) |
 | `PUBLIC_BASE_URL`, `OAUTH_TOKEN_SECRET`, `OAUTH_SESSION_SECRET` | Required when OAuth is enabled |
+| `STATE_FILE`, `STATE_ENCRYPTION_KEY` | Encrypted persistence, so a redeploy does not strand connected clients. Strongly recommended with OAuth |
 | `LOG_LEVEL` | pino level, default `info` |
 
 ## Local testing with the MCP Inspector
@@ -240,9 +241,9 @@ talking to ELO IX REST — and how they were resolved — see
 
 ## Roadmap
 
-- Encrypted persistence for OAuth state ([#4](https://github.com/LOUPZ-DE/elo-mcp-server/issues/4)), so a redeploy does not sign everyone
-  out. Deliberately not done in memory-only form: the store holds live ELO
-  sessions, which must not be written to a volume in clear text.
+- Horizontal scaling. State persistence is a single encrypted file rewritten in
+  full on every change, so it assumes one instance. More than one would need a
+  shared store rather than a volume.
 - Legacy `.doc` and `.xls` extraction (the pre-2007 binary formats). Deferred:
   both need a BIFF/OLE2 parser, and the maintained options are heavier than the
   demand justifies. Re-saving in the modern format is the cheaper fix.
