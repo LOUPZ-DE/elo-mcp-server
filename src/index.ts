@@ -291,10 +291,11 @@ function createServer(): McpServer {
       {
         title: 'Read ELO document text',
         description:
-          'Returns the extracted text of a document — this is how you read what is actually inside a PDF, Word file, e-mail (.eml/.msg) or text file in ELO. Use it whenever a question is about document *content* rather than about which documents exist.\n\n' +
+          'Returns the extracted text of a document — this is how you read what is actually inside a PDF, Word file, Excel workbook, e-mail (.eml/.msg) or text file in ELO. Use it whenever a question is about document *content* rather than about which documents exist.\n\n' +
           `Long documents are truncated at around ${cfg.ELO_MAX_TEXT_CHARS.toLocaleString('en-US')} characters; when \`truncated\` is true, call again with \`offset\` set to the returned \`nextOffset\` to read on.\n\n` +
           'For an e-mail (.eml or .msg) the result begins with a From/To/Subject/Date block, then the message body; attachments are listed by name only, and are usually filed as separate ELO documents you can read individually.\n\n' +
-          'Scanned PDFs have no text layer and return empty text with `textLayer: "none"` — say so rather than guessing at the content. Spreadsheets, presentations, images and ELO-encrypted documents (`.ecf`) cannot be read; the response explains why and gives you the eloLink to pass to the user.\n\n' +
+          'An Excel workbook (.xlsx/.xlsm) comes back one sheet at a time: a `Sheet: <name>` heading, then one line per row with cells separated by ` | `. The first row is usually the header. Dates are resolved to calendar dates, so read them as written rather than as numbers.\n\n' +
+          'Scanned PDFs have no text layer and return empty text with `textLayer: "none"` — say so rather than guessing at the content. Presentations, images, legacy .xls/.doc and ELO-encrypted documents (`.ecf`) cannot be read; the response explains why and gives you the eloLink to pass to the user.\n\n' +
           'When a clickable link is all that is needed, use elo_get_document_link instead — it is far cheaper.',
         inputSchema: GetDocumentContentInputSchema,
         annotations: readOnly,

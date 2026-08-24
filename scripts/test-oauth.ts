@@ -17,7 +17,9 @@ import { createHash, randomBytes } from 'node:crypto';
 const IX_PORT = Number(process.env.TEST_IX_PORT ?? 13401);
 const MCP_PORT = Number(process.env.TEST_OAUTH_PORT ?? 13402);
 const BASE = `http://127.0.0.1:${MCP_PORT}`;
-const BOOT_TIMEOUT_MS = 10_000;
+// Generous on purpose: on Windows a run that follows a fresh `tsc` competes
+// with the virus scanner reading dist/, and a slow boot is not a failure.
+const BOOT_TIMEOUT_MS = 25_000;
 
 const SHARED_SECRET = 'shared-' + randomBytes(12).toString('base64url');
 const TECH_USER = 'elo-technical';
@@ -147,9 +149,15 @@ function pkcePair(): { verifier: string; challenge: string } {
   return { verifier, challenge: createHash('sha256').update(verifier).digest('base64url') };
 }
 
-async function waitForBoot(): Promise<boolean> {
+/** Resolves once /health answers, or with the reason it never will. */
+async function waitForBoot(child: ChildProcess): Promise<true | string> {
   const deadline = Date.now() + BOOT_TIMEOUT_MS;
   while (Date.now() < deadline) {
+    // A crash on startup — a bad env, a port already taken — would otherwise be
+    // indistinguishable from a slow boot and get reported as a timeout.
+    if (child.exitCode !== null) {
+      return `the server exited with code ${child.exitCode} before serving /health`;
+    }
     try {
       const r = await fetch(`${BASE}/health`);
       if (r.status === 200) return true;
@@ -158,7 +166,7 @@ async function waitForBoot(): Promise<boolean> {
     }
     await sleep(200);
   }
-  return false;
+  return `no response on /health within ${BOOT_TIMEOUT_MS / 1000}s`;
 }
 
 function stop(child: ChildProcess): Promise<void> {
@@ -238,8 +246,9 @@ async function main(): Promise<void> {
     stdio: ['ignore', 'inherit', 'inherit'],
   });
 
-  if (!(await waitForBoot())) {
-    console.error('MCP server did not boot.');
+  const booted = await waitForBoot(server);
+  if (booted !== true) {
+    console.error(`MCP server did not start: ${booted}.`);
     await stop(server);
     ixServer.close();
     process.exit(1);

@@ -4,12 +4,14 @@ import type { ExtractInput, ExtractResult } from './types.js';
 export { EncryptedDocumentError, ExtractionFailedError } from './types.js';
 export type { ExtractResult, ExtractInput } from './types.js';
 
-type Kind = 'pdf' | 'docx' | 'eml' | 'msg' | 'plain' | 'unsupported';
+type Kind = 'pdf' | 'docx' | 'xlsx' | 'eml' | 'msg' | 'plain' | 'unsupported';
 
 const MIME_KINDS: Record<string, Kind> = {
   'application/pdf': 'pdf',
   'application/x-pdf': 'pdf',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+  'application/vnd.ms-excel.sheet.macroenabled.12': 'xlsx',
   'message/rfc822': 'eml',
   'application/vnd.ms-outlook': 'msg',
   'application/x-msg': 'msg',
@@ -25,6 +27,8 @@ const MIME_KINDS: Record<string, Kind> = {
 const EXT_KINDS: Record<string, Kind> = {
   PDF: 'pdf',
   DOCX: 'docx',
+  XLSX: 'xlsx',
+  XLSM: 'xlsx',
   EML: 'eml',
   MSG: 'msg',
   TXT: 'plain',
@@ -48,13 +52,28 @@ const KNOWN_UNREADABLE: Record<string, string> = {
   // The stream hands us ciphertext, so no parser can help.
   ECF: 'ELO-encrypted document (EloCrypt). The content is encrypted at rest, so no parser can read it — ELO decrypts it only for authorised users.',
   DOC: 'Legacy Word format (pre-2007). Not supported — re-save as .docx or open the eloLink.',
-  XLS: 'Legacy Excel format. Not supported — open the eloLink.',
-  XLSX: 'Excel workbook. Spreadsheet extraction is not enabled; open the eloLink.',
+  XLS: 'Legacy Excel format (pre-2007, binary BIFF). Not supported — re-save as .xlsx or open the eloLink.',
   PPT: 'Legacy PowerPoint format. Not supported — open the eloLink.',
   PPTX: 'PowerPoint presentation. Not supported — open the eloLink.',
   ZIP: 'Archive file. Its contents cannot be read directly.',
   DWG: 'CAD drawing. Not text-extractable.',
   IFC: 'IFC building model. Not text-extractable in a useful form.',
+};
+
+/**
+ * Lazy loaders, one per format. Imported on demand so a server that never sees
+ * a spreadsheet never pays for the spreadsheet parser; `plain` is not in here
+ * because it is synchronous and has nothing to load.
+ */
+const EXTRACTORS: Record<
+  Exclude<Kind, 'plain' | 'unsupported'>,
+  (input: ExtractInput) => Promise<ExtractResult>
+> = {
+  pdf: async (input) => (await import('./pdf.js')).extractPdf(input),
+  docx: async (input) => (await import('./docx.js')).extractDocx(input),
+  xlsx: async (input) => (await import('./xlsx.js')).extractXlsx(input),
+  eml: async (input) => (await import('./eml.js')).extractEml(input),
+  msg: async (input) => (await import('./msg.js')).extractMsg(input),
 };
 
 /**
@@ -100,16 +119,7 @@ export async function extractText(input: ExtractInput): Promise<ExtractResult> {
     };
   }
 
-  const result =
-    kind === 'pdf'
-      ? await (await import('./pdf.js')).extractPdf(input)
-      : kind === 'docx'
-        ? await (await import('./docx.js')).extractDocx(input)
-        : kind === 'eml'
-          ? (await import('./eml.js')).extractEml(input)
-          : kind === 'msg'
-            ? await (await import('./msg.js')).extractMsg(input)
-            : extractPlain(input);
+  const result = kind === 'plain' ? extractPlain(input) : await EXTRACTORS[kind](input);
 
   return { ...result, text: normaliseWhitespace(result.text) };
 }

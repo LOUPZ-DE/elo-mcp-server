@@ -19,7 +19,7 @@ Custom Connectors, Notion AI, Open WebUI, n8n, Make, …) can call.
 | `elo_find_project_folder` | Resolves a project to its data-room folder — exact match on the project number, fuzzy fallback, clearly labelled |
 | `elo_search` | Search across documents and folders, archive-wide or scoped to a project subtree |
 | `elo_list_folder` | Lists folder contents with depth, name filter, sorting and paging |
-| `elo_get_document_content` | Extracts the text of a PDF, Word, e-mail (`.eml`/`.msg`) or plain-text document |
+| `elo_get_document_content` | Extracts the text of a PDF, Word, Excel, e-mail (`.eml`/`.msg`) or plain-text document |
 | `elo_get_metadata` | Index fields, mask, owner, dates and version info for an `objId` |
 | `elo_get_document_link` | The authoritative link to an ELO object |
 
@@ -243,9 +243,9 @@ talking to ELO IX REST — and how they were resolved — see
 - Encrypted persistence for OAuth state ([#4](https://github.com/LOUPZ-DE/elo-mcp-server/issues/4)), so a redeploy does not sign everyone
   out. Deliberately not done in memory-only form: the store holds live ELO
   sessions, which must not be written to a volume in clear text.
-- Spreadsheet (`.xlsx`) and legacy `.doc` extraction. Deferred: the npm `xlsx`
-  package is frozen with known CVEs and the maintained build lives outside npm,
-  which is a poor fit for a public repository. `exceljs` is the likely route.
+- Legacy `.doc` and `.xls` extraction (the pre-2007 binary formats). Deferred:
+  both need a BIFF/OLE2 parser, and the maintained options are heavier than the
+  demand justifies. Re-saving in the modern format is the cheaper fix.
 - Optional signed download proxy, so a document could be fetched by a browser
   or a downstream system without an ELO session. Deliberately not built —
   it would expose archive documents on a URL that anyone holding the link can

@@ -29,6 +29,7 @@ import { McpTokenVerifier, SHARED_SECRET_CLIENT_ID } from '../src/oauth/verifier
 import { setConfig, config } from '../src/utils/runtimeConfig.js';
 import { setSession, getSession } from '../src/authn/session.js';
 import { classifyLoginError, isStaleCredentialError, resetEloSessions } from '../src/authn/eloLogin.js';
+import { zipSync, strToU8 } from 'fflate';
 
 let failures = 0;
 let count = 0;
@@ -896,6 +897,169 @@ test('pdf.js usage shape: summing glyph widths works', () => {
   // _getTextWidth does exactly this: sum widths, then divide by 1000.
   const widths = [500, 722, 333, 611, 278];
   assert.equal(sumPrecise(widths) / 1e3, 2.444);
+});
+
+// --- Spreadsheets -----------------------------------------------------------
+
+section('Extraction — Excel workbooks');
+
+/**
+ * Build a minimal but real .xlsx in memory.
+ *
+ * Checking a binary fixture into the repo would hide what is being tested;
+ * generating the OOXML parts here means the test states, in the open, exactly
+ * which cell shapes it exercises — in particular the styled date cell, which
+ * is the one that produces a wrong answer rather than a missing one when it
+ * goes wrong.
+ */
+function buildXlsx(sheets: Array<{ name: string; rows: Array<Array<string | number | Date | null>> }>): Buffer {
+  const strings: string[] = [];
+  const internString = (value: string): number => {
+    const existing = strings.indexOf(value);
+    if (existing !== -1) return existing;
+    strings.push(value);
+    return strings.length - 1;
+  };
+  const colName = (i: number): string => {
+    let n = i;
+    let out = '';
+    do {
+      out = String.fromCharCode(65 + (n % 26)) + out;
+      n = Math.floor(n / 26) - 1;
+    } while (n >= 0);
+    return out;
+  };
+  // Excel counts days from 1899-12-30; 25569 is the offset to the Unix epoch.
+  const serial = (d: Date): number => d.getTime() / 86_400_000 + 25569;
+  const esc = (s: string): string =>
+    s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+  const sheetXml = sheets.map(({ rows }) =>
+    `<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>${rows
+      .map((row, r) => {
+        const cells = row
+          .map((value, c) => {
+            if (value === null) return '';
+            const ref = `${colName(c)}${r + 1}`;
+            if (value instanceof Date) return `<c r="${ref}" s="1"><v>${serial(value)}</v></c>`;
+            if (typeof value === 'number') return `<c r="${ref}"><v>${value}</v></c>`;
+            return `<c r="${ref}" t="s"><v>${internString(value)}</v></c>`;
+          })
+          .join('');
+        return `<row r="${r + 1}">${cells}</row>`;
+      })
+      .join('')}</sheetData></worksheet>`,
+  );
+
+  const rels = sheets
+    .map((_, i) => `<Relationship Id="rId${i + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${i + 1}.xml"/>`)
+    .join('');
+  const overrides = sheets
+    .map((_, i) => `<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`)
+    .join('');
+
+  const files: Record<string, string> = {
+    '[Content_Types].xml': `<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>${overrides}<Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>`,
+    '_rels/.rels': `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`,
+    'xl/workbook.xml': `<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>${sheets
+      .map(({ name }, i) => `<sheet name="${esc(name)}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`)
+      .join('')}</sheets></workbook>`,
+    'xl/_rels/workbook.xml.rels': `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${rels}<Relationship Id="rIdStrings" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/><Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`,
+    // cellXfs[1] carries numFmtId 14 — the built-in short date format.
+    'xl/styles.xml': `<?xml version="1.0" encoding="UTF-8"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font/></fonts><fills count="1"><fill/></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" xfId="0"/><xf numFmtId="14" xfId="0" applyNumberFormat="1"/></cellXfs></styleSheet>`,
+  };
+  sheetXml.forEach((xml, i) => (files[`xl/worksheets/sheet${i + 1}.xml`] = xml));
+  files['xl/sharedStrings.xml'] = `<?xml version="1.0" encoding="UTF-8"?><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="${strings.length}" uniqueCount="${strings.length}"><si>${strings
+    .map((s) => esc(s))
+    .join('</t></si><si><t>')}</t></si></sst>`.replace('<si>', '<si><t>');
+
+  return Buffer.from(
+    zipSync(Object.fromEntries(Object.entries(files).map(([k, v]) => [k, strToU8(v)]))),
+  );
+}
+
+const xlsxInput = (data: Buffer) => ({ data, ext: 'XLSX', contentType: 'application/octet-stream' });
+
+test('a workbook flattens to pipe-separated rows under a sheet heading', async () => {
+  const data = buildXlsx([
+    { name: 'Rechnungen', rows: [['Beleg', 'Betrag'], ['RE-001', 1234.56]] },
+  ]);
+  const result = await extractText(xlsxInput(data));
+  assert.equal(result.extractor, 'xlsx');
+  assert.equal(result.textLayer, 'present');
+  assert.equal(result.text, 'Sheet: Rechnungen\nBeleg | Betrag\nRE-001 | 1234.56');
+});
+
+test('a date cell reads as a date, not as its serial number', async () => {
+  // The failure this guards against is not an empty result but a wrong one:
+  // an unformatted serial would report 45658 where 2025-01-01 was meant.
+  const data = buildXlsx([{ name: 'S', rows: [['Fällig', new Date(Date.UTC(2025, 0, 1))]] }]);
+  const result = await extractText(xlsxInput(data));
+  assert.match(result.text, /Fällig \| 2025-01-01$/);
+  assert.ok(!result.text.includes('45658'));
+});
+
+test('every sheet is included and named', async () => {
+  const data = buildXlsx([
+    { name: 'Erste', rows: [['a']] },
+    { name: 'Zweite', rows: [['b']] },
+  ]);
+  const result = await extractText(xlsxInput(data));
+  assert.equal(result.pageCount, 2);
+  assert.equal(result.text, 'Sheet: Erste\na\n\nSheet: Zweite\nb');
+});
+
+test('trailing empty cells and blank rows are dropped', async () => {
+  // Sheets routinely carry formatting far right of the data; rendering it
+  // would spend tokens on "a | | | |" for every row.
+  const data = buildXlsx([
+    { name: 'S', rows: [['a', null, null], [null, null], ['b']] },
+  ]);
+  const result = await extractText(xlsxInput(data));
+  assert.equal(result.text, 'Sheet: S\na\nb');
+});
+
+test('a line break inside a cell does not split the row', async () => {
+  const data = buildXlsx([{ name: 'S', rows: [['zwei\nzeilen', 'x']] }]);
+  const result = await extractText(xlsxInput(data));
+  assert.equal(result.text, 'Sheet: S\nzwei zeilen | x');
+});
+
+test('the separator survives whitespace normalisation', async () => {
+  // Regression guard for choosing " | " over tabs: normaliseWhitespace
+  // collapses runs of spaces and tabs, so a TSV grid would lose its columns.
+  assert.equal(normaliseWhitespace('a | b | c'), 'a | b | c');
+  assert.equal(normaliseWhitespace('a\tb\tc'), 'a b c');
+});
+
+test('an empty workbook says so instead of returning nothing', async () => {
+  const data = buildXlsx([{ name: 'Leer', rows: [] }]);
+  const result = await extractText(xlsxInput(data));
+  assert.equal(result.text, '');
+  assert.equal(result.textLayer, 'none');
+  assert.match(result.notice ?? '', /empty/i);
+});
+
+test('a password-protected workbook is named as such, not as a parse error', async () => {
+  // Excel wraps an encrypted package in an OLE2 container, which is not a ZIP.
+  const cfb = Buffer.concat([
+    Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]),
+    Buffer.alloc(512),
+  ]);
+  await assert.rejects(() => extractText(xlsxInput(cfb)), /password-protected|legacy \.xls/i);
+});
+
+test('a file that is not a workbook fails as an extraction error', async () => {
+  await assert.rejects(
+    () => extractText(xlsxInput(Buffer.from('definitely not a spreadsheet'))),
+    /could not be parsed/i,
+  );
+});
+
+test('legacy .xls is still reported as unreadable, with the reason', async () => {
+  const result = await extractText({ data: Buffer.from('x'), ext: 'XLS' });
+  assert.equal(result.extractor, 'none');
+  assert.match(result.notice ?? '', /Legacy Excel format/);
 });
 
 // --- OAuth: PKCE ------------------------------------------------------------
