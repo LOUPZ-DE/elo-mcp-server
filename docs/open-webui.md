@@ -16,7 +16,13 @@ HTTP directly to this server.
 | URL | `https://<your-elo-mcp-domain>/mcp` |
 | API Key / Bearer | `MCP_SHARED_SECRET` (just the token, no `Bearer` prefix) |
 
-That's it. The six `elo_*` tools appear in the chat tool palette automatically.
+That's it. The seven `elo_*` tools appear in the chat tool palette automatically,
+along with the server's icon.
+
+`elo_whoami` is worth knowing about here: over the shared secret every user of
+this Open WebUI instance acts as the same technical ELO account, and that tool
+says so plainly. It is the quickest way to check whether results are scoped the
+way you assumed.
 
 ## Verify
 

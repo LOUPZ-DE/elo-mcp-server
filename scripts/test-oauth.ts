@@ -515,6 +515,39 @@ async function main(): Promise<void> {
         `sessions used: ${duringCall.map((c) => c.user).join(', ') || 'none'}`,
     );
 
+    // --- Who am I ----------------------------------------------------------
+    //
+    // The question the tool exists to answer: with both auth paths on one
+    // endpoint, "no results" means something different depending on which
+    // identity is asking, and nothing else in the protocol reveals which.
+    const whoamiUser = await rpc(tokens.access_token, 'tools/call', { name: 'elo_whoami' });
+    const whoamiUserBody = await whoamiUser.text();
+    check(
+      'elo_whoami names the signed-in ELO user',
+      (whoamiUser.status === 200 &&
+        whoamiUserBody.includes('elo-user') &&
+        whoamiUserBody.includes(END_USER) &&
+        !whoamiUserBody.includes('"isError":true')) ||
+        `status ${whoamiUser.status}, body ${whoamiUserBody.slice(0, 250)}`,
+    );
+    check(
+      'elo_whoami works without an arguments field at all',
+      // Registered without an inputSchema precisely so an omitted `arguments`
+      // is accepted; with one the SDK rejects the call with -32602.
+      !whoamiUserBody.includes('-32602') || 'the call was rejected as invalid params',
+    );
+
+    const whoamiShared = await rpc(SHARED_SECRET, 'tools/call', { name: 'elo_whoami' });
+    const whoamiSharedBody = await whoamiShared.text();
+    check(
+      'elo_whoami names the technical account for an API-key caller',
+      (whoamiShared.status === 200 &&
+        whoamiSharedBody.includes('service-account') &&
+        whoamiSharedBody.includes(TECH_USER) &&
+        !whoamiSharedBody.includes(END_USER)) ||
+        `status ${whoamiShared.status}, body ${whoamiSharedBody.slice(0, 250)}`,
+    );
+
     // --- Coexistence with the shared secret --------------------------------
     const sharedBefore = ixCalls.length;
     const sharedCall = await rpc(SHARED_SECRET, 'tools/call', {
