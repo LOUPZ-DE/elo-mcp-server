@@ -34,6 +34,7 @@ import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { resolveIconPath } from '../src/utils/icon.js';
 import { join } from 'node:path';
 import {
   decodeStateKey,
@@ -1239,6 +1240,42 @@ test('another IX rejection is not reported as a wrong password', () => {
 test('a stale-credential error is recognised so the session can be dropped', () => {
   assert.ok(isStaleCredentialError(new Error('ELO login rejected: [ELOIX:3008] …')));
   assert.ok(!isStaleCredentialError(new Error('ELO findFirstSords failed (HTTP 500)')));
+});
+
+section('Server icon');
+
+/** Build a throwaway assets/ directory containing the named PNG stubs. */
+function assetsDirWith(...files: string[]): URL {
+  const dir = mkdtempSync(join(tmpdir(), 'elo-mcp-assets-'));
+  for (const name of files) writeFileSync(join(dir, name), 'not really a png');
+  return new URL(`file:///${dir.replace(/\\/g, '/')}/`);
+}
+
+test('icon.png wins when it is there', () => {
+  const dir = assetsDirWith('icon.png', 'elo_icon.png');
+  assert.match(resolveIconPath(dir)?.pathname ?? '', /icon\.png$/);
+  assert.ok(!resolveIconPath(dir)?.pathname.includes('elo_icon'));
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('a single differently named PNG is used anyway', () => {
+  // Replacing the icon is meant to be a file copy, and "icon.png" is not the
+  // name anyone reaches for when the file is a company logo.
+  const dir = assetsDirWith('elo_icon.png');
+  assert.match(resolveIconPath(dir)?.pathname ?? '', /elo_icon\.png$/);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('several PNGs and no icon.png is refused rather than guessed', () => {
+  const dir = assetsDirWith('elo_icon.png', 'other.png');
+  assert.equal(resolveIconPath(dir), undefined);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('an empty assets directory yields no icon', () => {
+  const dir = assetsDirWith();
+  assert.equal(resolveIconPath(dir), undefined);
+  rmSync(dir, { recursive: true, force: true });
 });
 
 section('State file — encryption');
