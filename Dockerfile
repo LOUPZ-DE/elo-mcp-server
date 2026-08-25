@@ -14,6 +14,9 @@ ENV NODE_ENV=production
 COPY package.json package-lock.json* ./
 RUN npm install --omit=dev && npm cache clean --force
 COPY --from=builder /app/dist ./dist
+# The server icon. Sits next to dist/ because src/utils/icon.ts resolves it as
+# ../assets, which then works the same under tsx, after a build, and in here.
+COPY assets ./assets
 
 # Home for the encrypted state file (STATE_FILE=/data/state.json), so DCR
 # registrations, refresh tokens and signed-in ELO sessions survive a redeploy.

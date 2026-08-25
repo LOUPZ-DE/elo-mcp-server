@@ -1,5 +1,6 @@
 import type { Request, Response } from 'express';
 import { config } from '../utils/runtimeConfig.js';
+import { loadIcon } from '../utils/icon.js';
 
 // Discovery documents. A client that gets a 401 from /mcp reads the
 // `resource_metadata` URL out of the WWW-Authenticate header, fetches the
@@ -51,6 +52,9 @@ export function mcpDescriptorHandler(_req: Request, res: Response): void {
     description:
       'Read-only access to the ELO document archive. Sign in with your own ELO account; ' +
       'searches and documents are scoped to your ELO permissions.',
+    // Notion reads this before any OAuth round trip, so it is how the mark
+    // appears in the connector list rather than only inside a session.
+    ...(loadIcon() ? { icon: `${cfg.PUBLIC_BASE_URL}/icon.png` } : {}),
     endpoint: cfg.MCP_RESOURCE,
   });
 }

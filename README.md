@@ -22,6 +22,7 @@ Custom Connectors, Notion AI, Open WebUI, n8n, Make, …) can call.
 | `elo_get_document_content` | Extracts the text of a PDF, Word, Excel, e-mail (`.eml`/`.msg`) or plain-text document |
 | `elo_get_metadata` | Index fields, mask, owner, dates and version info for an `objId` |
 | `elo_get_document_link` | The authoritative link to an ELO object |
+| `elo_whoami` | Which ELO account this connection acts as, and therefore whose permissions the other tools apply |
 
 Every result carries the object's archive `path` and a ready-made `eloLink`.
 That is deliberate: an assistant given only an `objId` has to reconstruct both,
@@ -140,7 +141,7 @@ Edit `%APPDATA%\Claude\claude_desktop_config.json`:
 }
 ```
 
-Restart Claude Desktop. The six `elo_*` tools must appear in the tool list.
+Restart Claude Desktop. The seven `elo_*` tools must appear in the tool list.
 
 ## Client integrations
 

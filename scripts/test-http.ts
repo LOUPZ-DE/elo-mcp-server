@@ -144,6 +144,29 @@ async function main(): Promise<void> {
   // an existing deployment: no new public endpoints, and no advertisement of an
   // authorization server that is not running. The OAuth flow itself is covered
   // end to end by scripts/test-oauth.ts.
+  // Served in every auth mode, and without a token: a client has to be able to
+  // show the mark before it holds one, and Open WebUI never holds an OAuth one.
+  await check(
+    'GET /icon.png → 200 image/png, no auth required',
+    () => fetch(`${BASE}/icon.png`),
+    (r) => {
+      if (r.status !== 200) return `status ${r.status}`;
+      const type = r.headers.get('content-type') ?? '';
+      return type.startsWith('image/png') || `content-type was "${type}"`;
+    },
+  );
+
+  await check(
+    'initialize advertises the icon and the whoami tool',
+    () => jsonRpc('initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'icon-test', version: '1' } }, 20),
+    (r, body) => {
+      if (r.status !== 200) return `status ${r.status}`;
+      // The icon reaches stdio clients only through serverInfo, so this is the
+      // path that has to carry it regardless of transport.
+      return body.includes('"icons"') || 'initialize carried no serverInfo.icons';
+    },
+  );
+
   await check(
     'default mode: no protected-resource document is published',
     () => fetch(`${BASE}/.well-known/oauth-protected-resource`),

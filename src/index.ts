@@ -40,6 +40,8 @@ import {
 import { corsMiddleware } from './utils/cors.js';
 import { rateLimit } from './utils/rateLimit.js';
 import { ensureStateWritable, flushState, loadState } from './utils/stateFile.js';
+import { iconSrc, loadIcon } from './utils/icon.js';
+import { eloWhoAmI } from './tools/elo_whoami.js';
 
 let cfg: ReturnType<typeof loadConfig>;
 try {
@@ -227,10 +229,19 @@ Completeness:
 - Every result is filtered by the ELO permissions of the account this connection signed in as. A document you cannot see may still exist. Say "I did not find it" — never "it does not exist in ELO".`;
 
 function createServer(): McpServer {
+  const icon = loadIcon();
+  const src = iconSrc(cfg.PUBLIC_BASE_URL);
   const server = new McpServer(
     {
       name: 'elo-mcp-server',
       version: '0.4.0',
+      // MCP 2025-11-25 (SEP-973). The transport-agnostic way to give clients a
+      // mark — and the only one that reaches a stdio client, which has no HTTP
+      // endpoint to fetch from.
+      ...(icon && src
+        ? { icons: [{ src, mimeType: icon.mimeType, sizes: icon.sizes }] }
+        : {}),
+      ...(cfg.PUBLIC_BASE_URL ? { websiteUrl: cfg.PUBLIC_BASE_URL } : {}),
     },
     { instructions: SERVER_INSTRUCTIONS },
   );
@@ -362,6 +373,33 @@ function createServer(): McpServer {
     },
   );
 
+  // Registered without an inputSchema on purpose. With one, the SDK zod-checks
+  // the arguments even when the client omits them entirely — which the MCP spec
+  // permits — and rejects the call with -32602. Without one, both a missing
+  // `arguments` and `{}` are accepted.
+  server.registerTool(
+    'elo_whoami',
+    {
+      title: 'Show the ELO identity in use',
+      description:
+        'Reports which ELO account this connection acts as, and therefore whose permissions the other tools apply.\n\n' +
+        'Worth calling when results look thinner than expected: a signed-in user only ever sees what their own ELO account may see, so an empty result can mean "not permitted" rather than "not there". Also the quickest way to confirm a connection is wired up as intended.',
+      annotations: readOnly,
+    },
+    async (extra) => {
+      try {
+        return asTextResult(
+          eloWhoAmI(extra.authInfo, {
+            technicalUser: cfg.ELO_USERNAME,
+            authMode: cfg.MCP_AUTH_MODE,
+          }),
+        );
+      } catch (err) {
+        return asError(err);
+      }
+    },
+  );
+
   server.registerTool(
     'elo_get_document_link',
     {
@@ -406,6 +444,20 @@ async function startHttp() {
   app.get('/health', (_req, res) => {
     res.json({ ok: true, transport: 'http', authMode: cfg.MCP_AUTH_MODE });
   });
+
+  // Unauthenticated, and mounted in every auth mode: a client has to be able to
+  // show the mark before it holds a token, and Open WebUI reaches it over the
+  // shared-secret path where none of the OAuth routes exist. It is a 2 KB image
+  // that reveals nothing.
+  const icon = loadIcon();
+  if (icon) {
+    app.get('/icon.png', corsMiddleware, (_req, res) => {
+      res
+        .set('Content-Type', icon.mimeType)
+        .set('Cache-Control', 'public, max-age=86400')
+        .send(icon.bytes);
+    });
+  }
 
   if (cfg.oauthEnabled) {
     // Discovery. A client that gets a 401 from /mcp finds its way here through
