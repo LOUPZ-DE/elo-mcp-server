@@ -19,6 +19,22 @@ export interface ServerIcon {
 
 let cached: ServerIcon | null | undefined;
 
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+/**
+ * Read the real dimensions out of the file rather than asserting them.
+ *
+ * A PNG's IHDR is the first chunk and sits at a fixed offset, so this is two
+ * reads. It matters because the size is advertised to clients: hard-coding it
+ * meant that replacing the icon — the one step this is meant to take — silently
+ * started telling clients the wrong thing.
+ */
+function readPngSize(bytes: Buffer): string | undefined {
+  if (bytes.length < 24 || !bytes.subarray(0, 8).equals(PNG_SIGNATURE)) return undefined;
+  if (bytes.subarray(12, 16).toString('ascii') !== 'IHDR') return undefined;
+  return `${bytes.readUInt32BE(16)}x${bytes.readUInt32BE(20)}`;
+}
+
 /**
  * Read the icon once, from `assets/` next to the compiled output.
  *
@@ -27,15 +43,24 @@ let cached: ServerIcon | null | undefined;
  * (`dist/utils` → root), and on `/app/assets` in the image, where the
  * Dockerfile copies `assets` alongside `dist`.
  *
- * A missing icon is not fatal. Dropping your own PNG in is meant to be the only
- * step needed to replace the default, and a server that refuses to boot over a
- * cosmetic file would be a poor trade.
+ * A missing or unreadable icon is not fatal. Replacing it is meant to be a
+ * single file drop — no code, no config — and a server that refuses to boot
+ * over a cosmetic file would be a poor trade.
  */
 export function loadIcon(): ServerIcon | undefined {
   if (cached !== undefined) return cached ?? undefined;
   try {
     const bytes = readFileSync(new URL('../../assets/icon.png', import.meta.url));
-    cached = { bytes, mimeType: 'image/png', sizes: ['256x256'] };
+    const size = readPngSize(bytes);
+    if (!size) {
+      // Serving a JPEG or an SVG under image/png would leave clients rendering
+      // nothing, with no clue why. Say so instead.
+      logger.warn('assets/icon.png is not a valid PNG — the server will present itself without an icon');
+      cached = null;
+      return undefined;
+    }
+    cached = { bytes, mimeType: 'image/png', sizes: [size] };
+    logger.debug({ size, bytes: bytes.length }, 'Server icon loaded');
   } catch (err) {
     logger.warn(
       { err: err instanceof Error ? err.message : err },
