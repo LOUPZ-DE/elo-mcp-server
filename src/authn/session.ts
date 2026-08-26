@@ -23,11 +23,16 @@ function sign(payload: string): string {
   return createHmac('sha256', config().OAUTH_SESSION_SECRET!).update(payload).digest('base64url');
 }
 
+// The browser cookie stays short regardless of the vault lifetime. The vault
+// TTL is raised to match the refresh token (30 days) so Notion connectors
+// survive; that TTL must NOT leak into client-side cookies — a month-long
+// SSO cookie on a laptop is a different risk than server-side state. An
+// expired cookie only forces one more login, not a broken connector.
+const BROWSER_COOKIE_MAX_AGE_SECONDS = 8 * 60 * 60;
+
 export function setSession(res: Response, identity: AuthnIdentity): void {
-  // Tied to the ELO session's idle lifetime rather than the refresh token's:
-  // once the vault entry is gone the cookie can only produce a dead-end code,
-  // so outliving it buys nothing.
-  const maxAge = config().ELO_USER_SESSION_TTL;
+  // Deliberately decoupled from ELO_USER_SESSION_TTL: see the constant above.
+  const maxAge = BROWSER_COOKIE_MAX_AGE_SECONDS;
   const data: SessionData = { ...identity, exp: Math.floor(Date.now() / 1000) + maxAge };
   const payload = Buffer.from(JSON.stringify(data), 'utf8').toString('base64url');
   const parts = [
