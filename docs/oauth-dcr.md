@@ -278,3 +278,52 @@ Deliberate, and worth stating plainly:
   `PUBLIC_BASE_URL/mcp` regardless, so this cannot widen a token.
 - **State persistence assumes one instance**, and is off unless `STATE_FILE`
   is configured. See "Surviving a redeploy".
+
+## Session lifetime vs. Notion's refresh handling
+
+Notion does not recover from a failed refresh grant. When `/token` answers
+`invalid_grant` because the ELO session behind the refresh token is gone,
+Notion offers no sign-in again — the connector stays broken till someone
+deletes and re-adds it. A vault session that expires before the refresh token
+therefore caps the effective connector lifetime, and idle expiry mid-week
+becomes a manual repair, not a re-login.
+
+Deployments whose primary consumer is Notion should align the vault TTL with
+the refresh token TTL:
+
+    ELO_USER_SESSION_TTL=2592000   # match OAUTH_REFRESH_TOKEN_TTL (30 days)
+
+`lastUsed` is refreshed on every successful refresh grant, so any connection
+used at least once within 30 days never hits the idle expiry. The browser
+login cookie (`elo_mcp_session`) is capped independently at 8 hours
+(src/authn/session.ts) — the vault TTL must not leak into cookie lifetime:
+a month-long SSO cookie on a client device is a different risk than
+server-side state, and an expired cookie costs one login, not the connector.
+
+Signed-in browser consumers (claude.ai) log in again daily; the OAuth
+connector behind them keeps working because the vault entry outlives the
+cookie.
+
+### Accepted residual risks
+
+With the 30-day vault TTL the following holds for up to 30 days per user,
+until the next idle sweep:
+
+- **Cleartext credentials in process memory.** The vault holds ELO passwords
+  in RAM because `EloClient` needs them for the periodic IX re-login. The
+  encrypted state file protects them at rest; it cannot protect them in the
+  process. Anyone with access to the running container (debug interfaces,
+  core dumps, compromised runtime) can read them. Mitigation is operational:
+  no shell access to the container, restricted platform access, no core
+  dumps enabled.
+- **Delayed enforcement of a password change.** After an ELO password change
+  the session is dropped on the next background re-login attempt
+  (`isStaleCredentialError`). Until that attempt fires, up to one IX refresh
+  interval may pass before the change is enforced here.
+- **Licence accounting is idle-based.** Only concurrently re-logged-in IX
+  sessions consume ELO licences; the vault entry itself does not.
+  `ELO_MAX_USER_SESSIONS` still bounds the pool.
+
+If any of these is not acceptable, leave `ELO_USER_SESSION_TTL` at the
+8-hour default and accept that Notion connectors must be re-added by hand
+after any idle window longer than 8 hours.
