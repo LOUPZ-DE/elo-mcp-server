@@ -392,6 +392,7 @@ function createServer(): McpServer {
           eloWhoAmI(extra.authInfo, {
             technicalUser: cfg.ELO_USERNAME,
             authMode: cfg.MCP_AUTH_MODE,
+            sessionIdleTtlSeconds: cfg.ELO_USER_SESSION_TTL,
           }),
         );
       } catch (err) {

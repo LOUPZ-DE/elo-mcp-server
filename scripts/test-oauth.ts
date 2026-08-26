@@ -552,6 +552,19 @@ async function main(): Promise<void> {
         !whoamiUserBody.includes('"isError":true')) ||
         `status ${whoamiUser.status}, body ${whoamiUserBody.slice(0, 250)}`,
     );
+    // An assistant read the old `tokenExpiresAt` and told the user "your ELO
+    // session lasts one hour" — that was OAUTH_ACCESS_TOKEN_TTL, and it says
+    // nothing about staying signed in. The two lifetimes are now named apart
+    // and spelled out, because whoever reads this output is a language model.
+    check(
+      'elo_whoami separates token expiry from sign-in expiry',
+      (whoamiUserBody.includes('accessTokenExpiresAt') &&
+        whoamiUserBody.includes('signInExpiresIfIdleUntil') &&
+        // The bare name that invited the misreading must be gone.
+        !/"tokenExpiresAt"/.test(whoamiUserBody)) ||
+        `body ${whoamiUserBody.slice(0, 400)}`,
+    );
+
     check(
       'elo_whoami works without an arguments field at all',
       // Registered without an inputSchema precisely so an omitted `arguments`
