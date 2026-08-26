@@ -13,10 +13,11 @@ import type { CheckoutUserResponse } from '../elo/types.js';
 // This is what makes per-user ELO access work at all. `runAsUser` impersonation
 // is refused by the live instance (BUGFIXES #21), so the only way to run tool
 // calls under a user's own ELO permissions is to hold a session that user
-// authenticated themselves. IX times sessions out after ~10 minutes and
-// `EloClient` re-logins on demand (client.ts:165) — which it can only do while
-// it still has the credentials. Hence: they stay in memory for the lifetime of
-// the session, and never anywhere else.
+// authenticated themselves. IX times sessions out on a schedule configured in
+// ELO — not a fixed ~10 minutes, as this once assumed — and `EloClient`
+// re-logins on demand (client.ts:165), which it can only do while it still has
+// the credentials. Hence: they stay in memory for the lifetime of the session,
+// and never anywhere else.
 //
 // They are never written to disk, never logged, and never put into a token: the
 // access token carries only the opaque `sid` handle into this map.

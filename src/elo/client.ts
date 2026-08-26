@@ -50,7 +50,14 @@ export interface EloClientConfig {
   runAsUser?: string;
 }
 
-const SESSION_REFRESH_MS = 8 * 60 * 1000; // re-login after 8 min (IX default timeout ≈ 10 min)
+// Re-login after 8 minutes of use. Chosen against an IX session timeout of
+// ~10 minutes, which is a default rather than a fact: the timeout is configured
+// in ELO and installations differ. A shorter interval than the timeout is always
+// safe; the cost is that `login()` does not log the previous session out, so
+// each refresh abandons one that lingers until IX reaps it. How many pile up
+// scales with the timeout — at an hour it would be seven or eight per
+// continuously active user. Nobody has measured this instance's setting.
+const SESSION_REFRESH_MS = 8 * 60 * 1000;
 
 export class EloClient {
   private readonly config: EloClientConfig;

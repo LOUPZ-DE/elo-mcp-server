@@ -15,6 +15,8 @@ export interface WhoAmIOptions {
   technicalUser: string;
   /** Configured MCP_AUTH_MODE, so the answer explains what else is possible. */
   authMode: 'shared' | 'oauth' | 'both';
+  /** ELO_USER_SESSION_TTL in seconds, to work out when a re-login is due. */
+  sessionIdleTtlSeconds: number;
 }
 
 export interface WhoAmIResult {
@@ -27,7 +29,19 @@ export interface WhoAmIResult {
   authMode: string;
   oauthClientId?: string;
   scopes?: string[];
-  tokenExpiresAt?: string;
+  /**
+   * When the current access token expires — NOT when the sign-in ends.
+   *
+   * Named at length because the short name invited exactly the misreading it
+   * got: an assistant reported this as "your ELO session lasts one hour", which
+   * is the OAUTH_ACCESS_TOKEN_TTL default and says nothing about the sign-in.
+   * The client refreshes this on its own and nobody has to do anything about it.
+   */
+  accessTokenExpiresAt?: string;
+  /** When an idle sign-in lapses and the login form comes back. The useful one. */
+  signInExpiresIfIdleUntil?: string;
+  /** Spelled out so it is read as a fact about tokens, not about the account. */
+  lifetimes?: string;
   /** Notion passes this through the authorization request; echoed for support. */
   notionUserId?: string;
   sessionOpenedAt?: string;
@@ -80,7 +94,17 @@ export function eloWhoAmI(
     authMode: opts.authMode,
     oauthClientId: authInfo?.clientId,
     scopes: authInfo?.scopes,
-    tokenExpiresAt: asIso(authInfo?.expiresAt),
+    accessTokenExpiresAt: asIso(authInfo?.expiresAt),
+    ...(session
+      ? {
+          signInExpiresIfIdleUntil: new Date(
+            session.lastUsed + opts.sessionIdleTtlSeconds * 1000,
+          ).toISOString(),
+        }
+      : {}),
+    lifetimes:
+      'accessTokenExpiresAt is the access token only — the client renews it silently, so it is not how long you stay signed in. ' +
+      'signInExpiresIfIdleUntil is when an unused sign-in lapses; any use before then pushes it back.',
     ...(typeof extra.notionUserId === 'string' ? { notionUserId: extra.notionUserId } : {}),
     ...(session
       ? {

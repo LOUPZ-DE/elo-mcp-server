@@ -246,6 +246,10 @@ async function startServer(encryptionKey = STATE_KEY): Promise<ChildProcess> {
       OAUTH_TOKEN_SECRET: TOKEN_SECRET,
       OAUTH_SESSION_SECRET: SESSION_SECRET,
       OAUTH_ACCESS_TOKEN_TTL: '300',
+      // Deliberately long, and deliberately not 8 hours: the cookie check below
+      // is only meaningful if the vault TTL is something the cookie could have
+      // inherited and visibly did not.
+      ELO_USER_SESSION_TTL: '2592000',
       STATE_FILE,
       STATE_ENCRYPTION_KEY: encryptionKey,
       ELO_BASE_URL: `http://127.0.0.1:${IX_PORT}`,
@@ -391,6 +395,24 @@ async function main(): Promise<void> {
         `status ${authorized.status}, location ${location}`,
     );
 
+    // The vault TTL above is 30 days. The browser cookie must not inherit it:
+    // server-side state under our control and a credential sitting on somebody's
+    // laptop are different risks, and an expired cookie costs one login rather
+    // than a broken connector. 8 hours is policy, hard-coded in
+    // src/authn/session.ts and deliberately not configurable.
+    const setCookie = authorized.headers.getSetCookie().find((c) => c.startsWith('elo_mcp_session='));
+    const maxAge = Number(setCookie?.match(/Max-Age=(\d+)/)?.[1] ?? NaN);
+    check(
+      'the login cookie is capped at 8 hours, not the 30-day vault TTL',
+      maxAge === 8 * 60 * 60 ||
+        `Max-Age was ${String(maxAge)} (expected 28800; the vault TTL is 2592000)`,
+    );
+    check(
+      'the login cookie is HttpOnly and SameSite=Lax',
+      (/HttpOnly/i.test(setCookie ?? '') && /SameSite=Lax/i.test(setCookie ?? '')) ||
+        `cookie was "${setCookie ?? '(none)'}"`,
+    );
+
     // The gotcha this whole design turns on: the end user authenticates to IX,
     // but the proxy in front of it must still see the technical account.
     const userLogin = ixCalls.find((c) => c.endpoint === 'login' && c.user === END_USER);
@@ -530,6 +552,19 @@ async function main(): Promise<void> {
         !whoamiUserBody.includes('"isError":true')) ||
         `status ${whoamiUser.status}, body ${whoamiUserBody.slice(0, 250)}`,
     );
+    // An assistant read the old `tokenExpiresAt` and told the user "your ELO
+    // session lasts one hour" — that was OAUTH_ACCESS_TOKEN_TTL, and it says
+    // nothing about staying signed in. The two lifetimes are now named apart
+    // and spelled out, because whoever reads this output is a language model.
+    check(
+      'elo_whoami separates token expiry from sign-in expiry',
+      (whoamiUserBody.includes('accessTokenExpiresAt') &&
+        whoamiUserBody.includes('signInExpiresIfIdleUntil') &&
+        // The bare name that invited the misreading must be gone.
+        !/"tokenExpiresAt"/.test(whoamiUserBody)) ||
+        `body ${whoamiUserBody.slice(0, 400)}`,
+    );
+
     check(
       'elo_whoami works without an arguments field at all',
       // Registered without an inputSchema precisely so an omitted `arguments`

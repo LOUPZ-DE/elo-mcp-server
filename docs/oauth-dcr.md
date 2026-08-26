@@ -137,10 +137,15 @@ Consequences worth knowing before you deploy:
   account — that would hand someone permissions they never had.
 - **A password change ends the session.** The next background re-login fails,
   the session is dropped, and the client sends the user back through the form.
-- **One IX session per signed-in user**, bounded by `ELO_MAX_USER_SESSIONS`
-  (default 50) and `ELO_USER_SESSION_TTL` (default 8 h idle). Because IX reaps
-  its own sessions after ~10 minutes and this server re-logins lazily, only
-  *concurrently active* users occupy licences.
+- **At least one IX session per signed-in user**, bounded by
+  `ELO_MAX_USER_SESSIONS` (default 50) and `ELO_USER_SESSION_TTL`.
+  `EloClient` re-logins every 8 minutes of use and does not log the previous
+  session out, so an abandoned session lingers until IX reaps it. How many pile
+  up therefore depends on the IX session timeout, which is configured in ELO,
+  not by us: at the 10 minutes this code was written against, roughly one; at a
+  one-hour timeout, up to seven or eight per continuously active user. Check
+  your instance's setting before sizing `ELO_MAX_USER_SESSIONS` against a
+  licence count.
 
 ## Surviving a redeploy
 
