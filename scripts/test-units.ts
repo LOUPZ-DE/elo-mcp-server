@@ -34,6 +34,15 @@ import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { respond } from '../src/mcp/respond.js';
+import {
+  nextStepsForDocumentContent,
+  nextStepsForListFolder,
+  nextStepsForProjectFolder,
+  nextStepsForSearch,
+  nextStepsForWhoAmI,
+} from '../src/mcp/nextSteps.js';
+import type { SordView } from '../src/elo/sord.js';
 import { resolveIconPath } from '../src/utils/icon.js';
 import { join } from 'node:path';
 import {
@@ -1240,6 +1249,124 @@ test('another IX rejection is not reported as a wrong password', () => {
 test('a stale-credential error is recognised so the session can be dropped', () => {
   assert.ok(isStaleCredentialError(new Error('ELO login rejected: [ELOIX:3008] …')));
   assert.ok(!isStaleCredentialError(new Error('ELO findFirstSords failed (HTTP 500)')));
+});
+
+section('Self-description — nextSteps');
+
+const sordView = (over: Partial<SordView> = {}): SordView => ({
+  objId: '900',
+  name: 'Ein Dokument',
+  type: 'document',
+  sordType: 254,
+  eloLink: 'https://link.example/900',
+  ...over,
+});
+
+test('respond omits nextSteps entirely when there are none', () => {
+  // An empty array in every answer would train the model to ignore the field.
+  const text = respond({ a: 1 }, []).content[0]!.text;
+  assert.ok(!text.includes('nextSteps'));
+  assert.deepEqual(JSON.parse(text), { a: 1 });
+});
+
+test('respond merges nextSteps into the payload', () => {
+  const parsed = JSON.parse(respond({ a: 1 }, ['do the thing']).content[0]!.text);
+  assert.deepEqual(parsed, { a: 1, nextSteps: ['do the thing'] });
+});
+
+test('one exact project match yields a scoped follow-up with the objId filled in', () => {
+  const steps = nextStepsForProjectFolder({
+    query: '10001', matchMode: 'exact', exactCount: 1, returned: 1, note: '',
+    results: [{ ...sordView({ objId: '500', type: 'folder', sordType: 3 }), matchType: 'exact', isProjectRoot: true }],
+  } as never);
+  assert.ok(steps.some((s) => s.includes('"folderId":"500"')));
+  assert.ok(steps.some((s) => s.includes('"parentId":"500"')));
+});
+
+test('several matches ask the user instead of naming a folder', () => {
+  // The instructions forbid picking one; a nextStep that picked would contradict them.
+  const steps = nextStepsForProjectFolder({
+    query: 'Muster', matchMode: 'fuzzy', exactCount: 0, returned: 2, note: '',
+    results: [
+      { ...sordView({ objId: '1', type: 'folder', sordType: 3 }), matchType: 'fuzzy', isProjectRoot: true },
+      { ...sordView({ objId: '2', type: 'folder', sordType: 3 }), matchType: 'fuzzy', isProjectRoot: true },
+    ],
+  } as never);
+  assert.equal(steps.length, 1);
+  assert.match(steps[0]!, /ask the user/i);
+  assert.ok(!steps[0]!.includes('elo_list_folder'));
+});
+
+test('a truncated listing offers the exact offset to continue from', () => {
+  const steps = nextStepsForListFolder({
+    folderId: '500', depth: 1, returned: 50, offset: 0, truncated: true, note: '',
+    results: [sordView()],
+  } as never);
+  assert.ok(steps.some((s) => s.includes('"offset":50')));
+});
+
+test('a listing of only folders suggests descending, one with documents does not', () => {
+  const onlyFolders = nextStepsForListFolder({
+    folderId: '500', depth: 1, returned: 1, offset: 0, truncated: false, note: '',
+    results: [sordView({ objId: '600', name: 'Berichte', type: 'folder', sordType: 3 })],
+  } as never);
+  assert.ok(onlyFolders.some((s) => s.includes('"folderId":"600"')));
+
+  const withDocs = nextStepsForListFolder({
+    folderId: '500', depth: 1, returned: 2, offset: 0, truncated: false, note: '',
+    results: [
+      sordView({ objId: '600', name: 'Berichte', type: 'folder', sordType: 3 }),
+      sordView({ objId: '700', name: 'Bericht.pdf' }),
+    ],
+  } as never);
+  // Reading beats descending when there is something to read; two hints dilute.
+  assert.ok(withDocs.some((s) => s.includes('elo_get_document_content')));
+  assert.ok(!withDocs.some((s) => s.includes('elo_list_folder with {"folderId":"600"')));
+});
+
+test('an already-scoped search does not repeat the scoping advice', () => {
+  const scoped = nextStepsForSearch({
+    query: 'Vertrag', engine: 'index', scope: { parentId: '500', depth: 1 },
+    returned: 1, offset: 0, truncated: false, note: '', results: [sordView()],
+  } as never);
+  assert.ok(!scoped.some((s) => s.includes('elo_find_project_folder')));
+
+  const archiveWide = nextStepsForSearch({
+    query: 'Vertrag', engine: 'esearch', returned: 1, offset: 0, truncated: false,
+    note: '', results: [sordView()],
+  } as never);
+  assert.ok(archiveWide.some((s) => s.includes('elo_find_project_folder')));
+});
+
+test('a scanned document is pointed at the link, not at more paging', () => {
+  const steps = nextStepsForDocumentContent({
+    objId: '700', truncated: false, textLayer: 'none',
+  } as never);
+  assert.equal(steps.length, 1);
+  assert.ok(steps[0]!.includes('elo_get_document_link'));
+  assert.ok(!steps[0]!.includes('offset'));
+});
+
+test('truncated text pages on, and says so', () => {
+  const steps = nextStepsForDocumentContent({
+    objId: '700', truncated: true, nextOffset: 50_000, textLayer: 'present',
+  } as never);
+  assert.ok(steps[0]!.includes('"offset":50000'));
+});
+
+test('whoami only suggests signing in when that would change something', () => {
+  assert.equal(
+    nextStepsForWhoAmI({ identity: 'elo-user', authMode: 'both' } as never).length,
+    0,
+  );
+  assert.equal(
+    nextStepsForWhoAmI({ identity: 'service-account', authMode: 'shared' } as never).length,
+    0,
+  );
+  assert.equal(
+    nextStepsForWhoAmI({ identity: 'service-account', authMode: 'both' } as never).length,
+    1,
+  );
 });
 
 section('Server icon');

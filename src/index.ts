@@ -42,6 +42,15 @@ import { rateLimit } from './utils/rateLimit.js';
 import { ensureStateWritable, flushState, loadState } from './utils/stateFile.js';
 import { iconSrc, loadIcon } from './utils/icon.js';
 import { eloWhoAmI } from './tools/elo_whoami.js';
+import { respond } from './mcp/respond.js';
+import {
+  nextStepsForDocumentContent,
+  nextStepsForListFolder,
+  nextStepsForMetadata,
+  nextStepsForProjectFolder,
+  nextStepsForSearch,
+  nextStepsForWhoAmI,
+} from './mcp/nextSteps.js';
 
 let cfg: ReturnType<typeof loadConfig>;
 try {
@@ -164,11 +173,6 @@ const listingOptions = {
   ],
 };
 
-function asTextResult(payload: unknown) {
-  return {
-    content: [{ type: 'text' as const, text: JSON.stringify(payload, null, 2) }],
-  };
-}
 
 function asError(err: unknown) {
   const msg = err instanceof Error ? err.message : String(err);
@@ -226,7 +230,11 @@ Identifying the right object:
 
 Completeness:
 - Results carry \`truncated\` and a \`note\`. When \`truncated\` is true the list is incomplete — never present it as exhaustive, and never call the first entry "the latest" or "the only" one.
-- Every result is filtered by the ELO permissions of the account this connection signed in as. A document you cannot see may still exist. Say "I did not find it" — never "it does not exist in ELO".`;
+- Every result is filtered by the ELO permissions of the account this connection signed in as. A document you cannot see may still exist. Say "I did not find it" — never "it does not exist in ELO".
+
+Working through a question:
+- Tool answers are JSON. When an answer carries a \`nextSteps\` field, those are the follow-up calls that make sense right here, with their arguments already filled in — prefer them over reconstructing a call yourself.
+- The usual order for a project question is elo_find_project_folder → elo_list_folder → elo_get_document_content; \`nextSteps\` names the next one at each stage.`;
 
 function createServer(): McpServer {
   const icon = loadIcon();
@@ -246,12 +254,23 @@ function createServer(): McpServer {
     { instructions: SERVER_INSTRUCTIONS },
   );
 
-  /** Every tool here reads; none of them writes. */
+  /**
+   * Every tool here reads; none of them writes.
+   *
+   * All four are stated rather than left to default, because the spec defaults
+   * are the opposite of what these tools are: an unannotated tool counts as
+   * `readOnlyHint: false` AND `destructiveHint: true`, so a cautious client has
+   * to gate it behind a prompt.
+   *
+   * `openWorldHint: false` because an ELO archive is a closed, known domain —
+   * one configured instance — not the open web. It was `true` until now, which
+   * was over-cautious rather than wrong.
+   */
   const readOnly = {
     readOnlyHint: true,
     destructiveHint: false,
     idempotentHint: true,
-    openWorldHint: true,
+    openWorldHint: false,
   } as const;
 
   server.registerTool(
@@ -268,9 +287,10 @@ function createServer(): McpServer {
     },
     async (args, extra) => {
       try {
-        return asTextResult(
-          await withEloClient(extra.authInfo, (c) => eloSearch(c, args, listingOptions)),
+        const result = await withEloClient(extra.authInfo, (c) =>
+          eloSearch(c, args, listingOptions),
         );
+        return respond(result, nextStepsForSearch(result));
       } catch (err) {
         return asError(err);
       }
@@ -290,11 +310,10 @@ function createServer(): McpServer {
     },
     async (args, extra) => {
       try {
-        return asTextResult(
-          await withEloClient(extra.authInfo, (c) =>
-            eloFindProjectFolder(c, args, projectFolderOptions),
-          ),
+        const result = await withEloClient(extra.authInfo, (c) =>
+          eloFindProjectFolder(c, args, projectFolderOptions),
         );
+        return respond(result, nextStepsForProjectFolder(result));
       } catch (err) {
         return asError(err);
       }
@@ -314,9 +333,10 @@ function createServer(): McpServer {
     },
     async (args, extra) => {
       try {
-        return asTextResult(
-          await withEloClient(extra.authInfo, (c) => eloListFolder(c, args, listingOptions)),
+        const result = await withEloClient(extra.authInfo, (c) =>
+          eloListFolder(c, args, listingOptions),
         );
+        return respond(result, nextStepsForListFolder(result));
       } catch (err) {
         return asError(err);
       }
@@ -340,11 +360,10 @@ function createServer(): McpServer {
       },
       async (args, extra) => {
         try {
-          return asTextResult(
-            await withContentSlot(() =>
-              withEloClient(extra.authInfo, (c) => eloGetDocumentContent(c, args, contentOptions)),
-            ),
+          const result = await withContentSlot(() =>
+            withEloClient(extra.authInfo, (c) => eloGetDocumentContent(c, args, contentOptions)),
           );
+          return respond(result, nextStepsForDocumentContent(result));
         } catch (err) {
           return asError(err);
         }
@@ -364,9 +383,10 @@ function createServer(): McpServer {
     },
     async (args, extra) => {
       try {
-        return asTextResult(
-          await withEloClient(extra.authInfo, (c) => eloGetMetadata(c, args, linkOptions)),
+        const result = await withEloClient(extra.authInfo, (c) =>
+          eloGetMetadata(c, args, linkOptions),
         );
+        return respond(result, nextStepsForMetadata(result));
       } catch (err) {
         return asError(err);
       }
@@ -388,13 +408,12 @@ function createServer(): McpServer {
     },
     async (extra) => {
       try {
-        return asTextResult(
-          eloWhoAmI(extra.authInfo, {
-            technicalUser: cfg.ELO_USERNAME,
-            authMode: cfg.MCP_AUTH_MODE,
-            sessionIdleTtlSeconds: cfg.ELO_USER_SESSION_TTL,
-          }),
-        );
+        const result = eloWhoAmI(extra.authInfo, {
+          technicalUser: cfg.ELO_USERNAME,
+          authMode: cfg.MCP_AUTH_MODE,
+          sessionIdleTtlSeconds: cfg.ELO_USER_SESSION_TTL,
+        });
+        return respond(result, nextStepsForWhoAmI(result));
       } catch (err) {
         return asError(err);
       }
@@ -414,7 +433,7 @@ function createServer(): McpServer {
     },
     async (args, extra) => {
       try {
-        return asTextResult(
+        return respond(
           await withEloClient(extra.authInfo, (c) => eloGetDocumentLink(c, args, linkOptions)),
         );
       } catch (err) {
