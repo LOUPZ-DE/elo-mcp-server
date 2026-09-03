@@ -43,6 +43,15 @@ import {
   nextStepsForWhoAmI,
 } from '../src/mcp/nextSteps.js';
 import type { SordView } from '../src/elo/sord.js';
+import { requireEloUser } from '../src/write/guard.js';
+import { hashPayload, prepareWrite, consumeWrite, resetPreflight } from '../src/write/preflight.js';
+import {
+  assertTargetAllowed,
+  assertMaskAllowed,
+  assertFieldsAllowed,
+  assertFileAllowed,
+} from '../src/write/policy.js';
+import { onceOnly, resetIdempotency } from '../src/write/idempotency.js';
 import { resolveIconPath } from '../src/utils/icon.js';
 import { join } from 'node:path';
 import {
@@ -1367,6 +1376,204 @@ test('whoami only suggests signing in when that would change something', () => {
     nextStepsForWhoAmI({ identity: 'service-account', authMode: 'both' } as never).length,
     1,
   );
+});
+
+section('Write — the identity gate');
+
+const authOf = (over: Record<string, unknown> = {}) =>
+  ({ token: 't', clientId: 'dcr-client', scopes: ['mcp'], expiresAt: 9e9, ...over }) as never;
+
+test('a connection with no identity at all is refused', () => {
+  // stdio: no bearer token, so nobody to attribute a write to.
+  assert.throws(() => requireEloUser(undefined), /no identity/i);
+});
+
+test('the shared secret is refused, and told why', () => {
+  // The case withEloClient cannot see: no eloSid, exactly like stdio.
+  assert.throws(
+    () => requireEloUser(authOf({ clientId: SHARED_SECRET_CLIENT_ID, extra: {} })),
+    /read-only|Sign in with OAuth/i,
+  );
+});
+
+test('an OAuth token without an ELO session is refused', () => {
+  assert.throws(() => requireEloUser(authOf({ extra: {} })), /no ELO session/i);
+});
+
+test('an eloSid that no longer resolves is refused, never downgraded', () => {
+  resetEloSessions();
+  assert.throws(() => requireEloUser(authOf({ extra: { eloSid: 'gone' } })), /expired/i);
+});
+
+section('Write — the confirmation token');
+
+const prepared = () =>
+  prepareWrite({
+    operation: 'create_folder',
+    userName: 'jdoe',
+    clientId: 'dcr-client',
+    payloadHash: hashPayload({ name: 'Neuer Ordner', parentId: '567085' }),
+    targetId: '567085',
+  });
+const expectation = (over: Record<string, unknown> = {}) => ({
+  userName: 'jdoe',
+  clientId: 'dcr-client',
+  operation: 'create_folder' as const,
+  payloadHash: hashPayload({ name: 'Neuer Ordner', parentId: '567085' }),
+  ...over,
+});
+
+test('the payload hash ignores key order', () => {
+  assert.equal(hashPayload({ a: 1, b: 2 }), hashPayload({ b: 2, a: 1 }));
+  assert.notEqual(hashPayload({ a: 1 }), hashPayload({ a: 2 }));
+});
+
+test('a matching token is accepted exactly once', () => {
+  resetPreflight();
+  const { token } = prepared();
+  assert.equal(consumeWrite(token, expectation()).targetId, '567085');
+  assert.throws(() => consumeWrite(token, expectation()), /unknown or has already been used/i);
+});
+
+test('a token issued to another user is refused', () => {
+  resetPreflight();
+  const { token } = prepared();
+  assert.throws(
+    () => consumeWrite(token, expectation({ userName: 'someone-else' })),
+    /does not belong to this session/i,
+  );
+});
+
+test('a token issued through another client is refused', () => {
+  resetPreflight();
+  const { token } = prepared();
+  assert.throws(
+    () => consumeWrite(token, expectation({ clientId: 'other-client' })),
+    /does not belong to this session/i,
+  );
+});
+
+test('a changed payload is refused — the preview no longer matches', () => {
+  resetPreflight();
+  const { token } = prepared();
+  assert.throws(
+    () => consumeWrite(token, expectation({ payloadHash: hashPayload({ name: 'Etwas anderes' }) })),
+    /values changed/i,
+  );
+});
+
+test('a token for another operation is refused', () => {
+  resetPreflight();
+  const { token } = prepared();
+  assert.throws(
+    () => consumeWrite(token, expectation({ operation: 'update_metadata' })),
+    /issued for "create_folder"/,
+  );
+});
+
+test('an expired token is refused', () => {
+  resetPreflight();
+  const previous = config();
+  setConfig({ ...previous, ELO_WRITE_PREFLIGHT_TTL: 1 });
+  const { token } = prepared();
+  setConfig(previous);
+  // Reach into the future rather than sleeping: the entry carries an absolute
+  // expiry, so rewinding the clock is the same test without the wait.
+  const realNow = Date.now;
+  Date.now = () => realNow() + 5_000;
+  try {
+    assert.throws(() => consumeWrite(token, expectation()), /expired/i);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+section('Write — policy');
+
+const policy = {
+  rootIds: ['567085'],
+  masks: ['Ordner'],
+  fields: ['PRJ_NO'],
+  mimeTypes: ['application/pdf'],
+  maxBytes: 1000,
+};
+const sordAt = (id: string, pathIds: string[]): EloSord => ({
+  id, name: 'Ziel', type: 4,
+  refPaths: [{ path: pathIds.map((p) => ({ id: p, name: p })) }],
+});
+
+test('the sandbox folder itself is a permitted target', () => {
+  assert.doesNotThrow(() => assertTargetAllowed(sordAt('567085', ['1']), policy));
+});
+
+test('something inside the sandbox is permitted', () => {
+  assert.doesNotThrow(() => assertTargetAllowed(sordAt('900', ['1', '567085']), policy));
+});
+
+test('the sandbox PARENT is not permitted', () => {
+  // 548303 is /IT/IT-Sicherheit — a real production area. Allowing the parent
+  // would put the whole department inside the write area.
+  assert.throws(() => assertTargetAllowed(sordAt('548303', ['1']), policy), /outside every/i);
+});
+
+test('an empty root list permits nothing', () => {
+  assert.throws(
+    () => assertTargetAllowed(sordAt('567085', ['1']), { ...policy, rootIds: [] }),
+    /nothing may be written/i,
+  );
+});
+
+test('masks and fields are allowlisted, and rejections are reported together', () => {
+  assert.doesNotThrow(() => assertMaskAllowed('Ordner', policy));
+  assert.throws(() => assertMaskAllowed('Rechnung', policy), /not permitted/i);
+  assert.doesNotThrow(() => assertFieldsAllowed({ PRJ_NO: '1' }, policy));
+  // Both rejects named in one message — a caller fixing them one per round trip
+  // is a caller we made three more requests for no reason.
+  assert.throws(
+    () => assertFieldsAllowed({ PRJ_NO: '1', SOL_TYPE: 'x', OWNER: 'y' }, policy),
+    /SOL_TYPE, OWNER/,
+  );
+});
+
+test('uploads are checked on type and size', () => {
+  assert.doesNotThrow(() => assertFileAllowed('application/pdf; charset=binary', 500, policy));
+  assert.throws(() => assertFileAllowed('image/png', 500, policy), /may not be uploaded/i);
+  assert.throws(() => assertFileAllowed('application/pdf', 5000, policy), /the limit is/i);
+  assert.throws(() => assertFileAllowed('application/pdf', 0, policy), /empty/i);
+});
+
+section('Write — idempotency');
+
+test('a repeated key returns the first result without acting again', async () => {
+  resetIdempotency();
+  let calls = 0;
+  const run = async () => { calls++; return 'objId-1'; };
+  const a = await onceOnly('jdoe', 'k1', run);
+  const b = await onceOnly('jdoe', 'k1', run);
+  assert.equal(calls, 1);
+  assert.equal(b.result, 'objId-1');
+  assert.equal(a.replayed, false);
+  assert.equal(b.replayed, true);
+});
+
+test('the same key from another user is a different operation', async () => {
+  resetIdempotency();
+  let calls = 0;
+  const run = async () => { calls++; return 'x'; };
+  await onceOnly('jdoe', 'k1', run);
+  await onceOnly('someone-else', 'k1', run);
+  assert.equal(calls, 2);
+});
+
+test('a failure is not remembered, so a retry may still succeed', async () => {
+  resetIdempotency();
+  let calls = 0;
+  await assert.rejects(() =>
+    onceOnly('jdoe', 'k2', async () => { calls++; throw new Error('IX down'); }),
+  );
+  const { result } = await onceOnly('jdoe', 'k2', async () => { calls++; return 'ok'; });
+  assert.equal(calls, 2);
+  assert.equal(result, 'ok');
 });
 
 section('Server icon');
