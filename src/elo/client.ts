@@ -200,6 +200,38 @@ export class EloClient {
   }
 
   /**
+   * Like `request()`, but never replays the call.
+   *
+   * `request()` re-logins and repeats the POST once when IX reports an invalid
+   * session. That is right for a read — worst case the same rows come back
+   * twice. It is wrong for anything that creates: the first attempt may well
+   * have reached IX and succeeded, with only the response lost, and the replay
+   * then files a second folder or a second document version.
+   *
+   * A session that expired mid-write is therefore surfaced rather than papered
+   * over. The caller is holding a confirmation token it has already spent, so
+   * the correct outcome is a fresh preview and a fresh confirmation — not a
+   * silent second attempt nobody asked for.
+   *
+   * `ensureSession()` still runs first, so the ordinary case of an eight-minute
+   * session having lapsed *before* the call is handled without any replay at all.
+   */
+  async requestOnce<T>(endpoint: string, body: unknown): Promise<T> {
+    await this.ensureSession();
+    try {
+      const response = await this.http.post<T>(endpoint, this.injectCi(body), {
+        headers: this.authHeaders(),
+      });
+      // IX answers most business errors with HTTP 200 and an `exception` body
+      // (BUGFIXES #1), so the status code alone proves nothing.
+      this.assertNoException(response.data, endpoint);
+      return response.data;
+    } catch (err) {
+      throw this.enrichAxiosError(err, endpoint);
+    }
+  }
+
+  /**
    * Fetch a document's bytes from an IX content URL.
    *
    * Deliberately not routed through `request()`: that method injects `ci`,

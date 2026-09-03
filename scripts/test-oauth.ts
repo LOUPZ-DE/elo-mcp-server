@@ -65,6 +65,12 @@ interface IxCall {
 
 const ixCalls: IxCall[] = [];
 const ixSessions = new Map<string, string>();
+/** Objects the stub "archive" holds, so a write can be read back. */
+const ixObjects = new Map<string, Record<string, unknown>>();
+/** Every checkin, so a test can assert one object was created and not two. */
+const ixWrites: Array<{ endpoint: string; objId: string; user: string | undefined }> = [];
+let ixSordCounter = 0;
+let ixCheckinCounter = 0;
 let ixSessionCounter = 0;
 
 function basicUserOf(req: IncomingMessage): string | undefined {
@@ -148,6 +154,49 @@ const ixServer = createServer(async (req, res) => {
     json({ result: { id: '42', name: END_USER, desc: 'Test User' } });
     return;
   }
+
+  // --- Write endpoints -------------------------------------------------------
+  //
+  // Spelled out rather than left to the catch-all below, which would answer
+  // `{result:{}}` and make a write look like it succeeded while doing nothing.
+  if (endpoint.endsWith('/checkoutSord')) {
+    const objId = String(body.objId ?? '');
+    const sord = ixObjects.get(objId);
+    if (!sord) {
+      // How IX really refuses: HTTP 200 with an exception body (BUGFIXES #1).
+      json({ exception: { name: 'IXExceptionC', message: `[ELOIX:5023] Objekt ${objId} nicht gefunden` } });
+      return;
+    }
+    json({ result: { sord } });
+    return;
+  }
+  if (endpoint.endsWith('/createSord')) {
+    // Persists nothing — a template only, exactly as the real createSord does.
+    json({
+      result: {
+        sord: {
+          id: '0', name: '', type: 4, maskName: String(body.maskId ?? ''),
+          parentId: String(body.parentId ?? ''), objKeys: [],
+        },
+      },
+    });
+    return;
+  }
+  if (endpoint.endsWith('/checkinSord')) {
+    const sord = (body.sord ?? {}) as Record<string, unknown>;
+    const existing = String(sord.id ?? '0');
+    const objId = existing !== '0' && existing !== '' ? existing : `9${++ixSordCounter}`;
+    ixWrites.push({ endpoint: 'checkinSord', objId, user: sessionUserOf(req) });
+    ixObjects.set(objId, {
+      ...sord, id: objId,
+      // Every checkin moves the change date; that is what makes the optimistic
+      // conflict check able to notice a concurrent edit.
+      XDateIso: `2026090${++ixCheckinCounter}120000`,
+    });
+    json({ result: Number(objId) });
+    return;
+  }
+
   json({ result: {} });
 });
 
@@ -250,6 +299,12 @@ async function startServer(encryptionKey = STATE_KEY): Promise<ChildProcess> {
       // is only meaningful if the vault TTL is something the cookie could have
       // inherited and visibly did not.
       ELO_USER_SESSION_TTL: '2592000',
+      // Writing on, confined to the sandbox object the stub archive holds.
+      ELO_WRITE_ENABLED: 'true',
+      ELO_WRITE_ROOT_IDS: SANDBOX_ID,
+      ELO_WRITE_MASKS: 'Ordner',
+      ELO_WRITE_FIELDS: 'PRJ_NO,PRJ_NAME',
+      ELO_WRITE_MIME_TYPES: 'application/pdf',
       STATE_FILE,
       STATE_ENCRYPTION_KEY: encryptionKey,
       ELO_BASE_URL: `http://127.0.0.1:${IX_PORT}`,
@@ -264,6 +319,14 @@ async function startServer(encryptionKey = STATE_KEY): Promise<ChildProcess> {
   if (booted !== true) throw new Error(`MCP server did not start: ${booted}`);
   return child;
 }
+
+// The sandbox the write policy is pointed at in these tests.
+const SANDBOX_ID = '567085';
+ixObjects.set(SANDBOX_ID, {
+  id: SANDBOX_ID, name: 'Temporärer Testbereich MCP', type: 4, maskName: 'Ordner',
+  parentId: '548303', objKeys: [], XDateIso: '20260901120000',
+  refPaths: [{ path: [{ id: '1', name: 'IT' }, { id: '548303', name: 'IT-Sicherheit' }] }],
+});
 
 async function main(): Promise<void> {
   await new Promise<void>((resolve) => ixServer.listen(IX_PORT, '127.0.0.1', resolve));
@@ -581,6 +644,110 @@ async function main(): Promise<void> {
         whoamiSharedBody.includes(TECH_USER) &&
         !whoamiSharedBody.includes(END_USER)) ||
         `status ${whoamiShared.status}, body ${whoamiSharedBody.slice(0, 250)}`,
+    );
+
+    // --- Writing -----------------------------------------------------------
+    //
+    // The rule the whole design rests on: a write needs a person. The shared
+    // secret runs as the technical account, so a write through it would be
+    // attributed to the wrong identity — and withEloClient cannot tell that
+    // caller apart from stdio, which is why the guard looks at AuthInfo itself.
+    const writeAsApiKey = await rpc(SHARED_SECRET, 'tools/call', {
+      name: 'elo_create_folder',
+      arguments: { parentId: SANDBOX_ID, name: 'Sollte nicht entstehen', maskName: 'Ordner' },
+    });
+    const writeAsApiKeyBody = await writeAsApiKey.text();
+    check(
+      'the shared secret cannot reach a write tool',
+      (writeAsApiKeyBody.includes('"isError":true') &&
+        /read-only|Sign in with OAuth/i.test(writeAsApiKeyBody)) ||
+        `body ${writeAsApiKeyBody.slice(0, 250)}`,
+    );
+
+    const writesBefore = ixWrites.length;
+    const prepared = await rpc(tokens.access_token, 'tools/call', {
+      name: 'elo_create_folder',
+      arguments: { parentId: SANDBOX_ID, name: 'Neuer Testordner', maskName: 'Ordner' },
+    });
+    const preparedBody = await prepared.text();
+    const confirmToken = preparedBody.match(/\\"confirmToken\\":\s*\\"([^\\"]+)\\"/)?.[1];
+    check(
+      'preparing shows a preview, issues a token, and writes nothing',
+      (confirmToken !== undefined &&
+        ixWrites.length === writesBefore &&
+        preparedBody.includes('Nothing has been written')) ||
+        `token ${String(confirmToken)}, writes ${ixWrites.length - writesBefore}`,
+    );
+
+    // Outside the sandbox: refused at preview, so nobody ever confirms
+    // something that was never going to work.
+    const outside = await rpc(tokens.access_token, 'tools/call', {
+      name: 'elo_create_folder',
+      arguments: { parentId: '548303', name: 'Im Produktivbereich', maskName: 'Ordner' },
+    });
+    const outsideBody = await outside.text();
+    check(
+      'a target outside the configured area is refused before any token exists',
+      (outsideBody.includes('"isError":true') && !outsideBody.includes('confirmToken')) ||
+        `body ${outsideBody.slice(0, 250)}`,
+    );
+
+    const committed = await rpc(tokens.access_token, 'tools/call', {
+      name: 'elo_create_folder_commit',
+      arguments: {
+        parentId: SANDBOX_ID, name: 'Neuer Testordner', maskName: 'Ordner',
+        confirmToken, idempotencyKey: 'test-key-1',
+      },
+    });
+    const committedBody = await committed.text();
+    check(
+      'committing with the token creates exactly one object',
+      (!committedBody.includes('"isError":true') && ixWrites.length === writesBefore + 1) ||
+        `writes ${ixWrites.length - writesBefore}, body ${committedBody.slice(0, 250)}`,
+    );
+    check(
+      'the write ran on the user session, not the technical account',
+      ixWrites[ixWrites.length - 1]?.user === END_USER ||
+        `ran as ${String(ixWrites[ixWrites.length - 1]?.user)}`,
+    );
+
+    // The token is spent. This is what stops a replayed confirmation.
+    const spentAgain = await rpc(tokens.access_token, 'tools/call', {
+      name: 'elo_create_folder_commit',
+      arguments: {
+        parentId: SANDBOX_ID, name: 'Neuer Testordner', maskName: 'Ordner',
+        confirmToken, idempotencyKey: 'test-key-2',
+      },
+    });
+    const spentAgainBody = await spentAgain.text();
+    check(
+      'the same confirmation cannot be spent twice',
+      (spentAgainBody.includes('"isError":true') &&
+        /already been used|unknown/i.test(spentAgainBody) &&
+        ixWrites.length === writesBefore + 1) ||
+        `writes ${ixWrites.length - writesBefore}, body ${spentAgainBody.slice(0, 200)}`,
+    );
+
+    // A duplicate that is not a replayed token but a retried request: same
+    // idempotency key, fresh confirmation. One object, not two.
+    const retryPrepare = await rpc(tokens.access_token, 'tools/call', {
+      name: 'elo_create_folder',
+      arguments: { parentId: SANDBOX_ID, name: 'Wiederholung', maskName: 'Ordner' },
+    });
+    const retryToken = (await retryPrepare.text()).match(/\\"confirmToken\\":\s*\\"([^\\"]+)\\"/)?.[1];
+    const beforeRetry = ixWrites.length;
+    for (const _ of [1, 2]) {
+      await rpc(tokens.access_token, 'tools/call', {
+        name: 'elo_create_folder_commit',
+        arguments: {
+          parentId: SANDBOX_ID, name: 'Wiederholung', maskName: 'Ordner',
+          confirmToken: retryToken, idempotencyKey: 'retry-key',
+        },
+      });
+    }
+    check(
+      'a repeated idempotency key does not create a second object',
+      ixWrites.length === beforeRetry + 1 || `created ${ixWrites.length - beforeRetry}`,
     );
 
     // --- Coexistence with the shared secret --------------------------------

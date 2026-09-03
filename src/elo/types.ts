@@ -135,3 +135,14 @@ export interface EloUserInfo {
 }
 
 export type CheckoutUserResponse = EloResponse<EloUserInfo>;
+
+/**
+ * `createSord` hands back an EditInfo carrying a *template* sord — nothing is
+ * persisted until `checkinSord` is called with it. `checkinSord` answers with
+ * the objId of the stored object as a bare number.
+ *
+ * Both signatures were read from the live instance's OpenAPI document
+ * (Indexserver 23.0.0.0, GET /rest/openapi.json), not from the JavaDoc.
+ */
+export type CreateSordResponse = EloResponse<EloEditInfo>;
+export type CheckinSordResponse = EloResponse<number>;

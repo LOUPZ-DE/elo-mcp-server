@@ -51,6 +51,21 @@ import {
   nextStepsForSearch,
   nextStepsForWhoAmI,
 } from './mcp/nextSteps.js';
+import { requireEloUser } from './write/guard.js';
+import { parseList, type WritePolicy } from './write/policy.js';
+import { startPreflightSweep } from './write/preflight.js';
+import { startIdempotencySweep } from './write/idempotency.js';
+import {
+  CreateFolderInputSchema,
+  CommitInputSchema,
+  prepareCreateFolder,
+  commitCreateFolder,
+} from './tools/elo_write_folder.js';
+import {
+  UpdateMetadataInputSchema,
+  prepareUpdateMetadata,
+  commitUpdateMetadata,
+} from './tools/elo_write_metadata.js';
 
 let cfg: ReturnType<typeof loadConfig>;
 try {
@@ -157,6 +172,16 @@ const contentOptions = {
   maxBytes: cfg.ELO_MAX_DOCUMENT_BYTES,
   maxChars: cfg.ELO_MAX_TEXT_CHARS,
   timeoutMs: cfg.ELO_DOWNLOAD_TIMEOUT_MS,
+};
+
+// Allowlists for the write MVP. Empty lists permit nothing; loadConfig()
+// refuses to start with writing enabled and no target root.
+const writePolicy: WritePolicy = {
+  rootIds: parseList(cfg.ELO_WRITE_ROOT_IDS),
+  masks: parseList(cfg.ELO_WRITE_MASKS),
+  fields: parseList(cfg.ELO_WRITE_FIELDS),
+  mimeTypes: parseList(cfg.ELO_WRITE_MIME_TYPES).map((m) => m.toLowerCase()),
+  maxBytes: cfg.ELO_WRITE_MAX_BYTES,
 };
 
 /** Serialises document downloads so parallel large files cannot exhaust memory. */
@@ -442,6 +467,131 @@ function createServer(): McpServer {
     },
   );
 
+  // --- Write tools ----------------------------------------------------------
+  //
+  // Not registered at all unless writing is switched on, so a client of a
+  // read-only deployment never sees them — same as elo_get_document_content.
+  if (cfg.ELO_WRITE_ENABLED) {
+    /**
+     * Adds something; nothing existing is replaced, and ELO keeps what was
+     * there before. `destructiveHint: false` is the point of this literal —
+     * without it the spec default (true, once readOnlyHint is false) would put
+     * creating an empty folder in the same category as overwriting data.
+     */
+    const writeAdditive = {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    } as const;
+
+    /** Replaces values that were already there. Honestly destructive. */
+    const writeDestructive = {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: false,
+    } as const;
+
+    const writeOptions = { policy: writePolicy, webclientBaseUrl: cfg.ELO_WEBCLIENT_URL };
+    /** Writes never run as the technical account — the guard has no fallback. */
+    const userClient = (authInfo: AuthInfo | undefined) => requireEloUser(authInfo).client;
+
+    server.registerTool(
+      'elo_create_folder',
+      {
+        title: 'Preview: create a folder',
+        description:
+          'Checks whether a folder could be created and shows exactly what would happen. Writes nothing. Returns a confirmToken; pass it to elo_create_folder_commit to actually create the folder.',
+        inputSchema: CreateFolderInputSchema,
+        annotations: readOnly,
+      },
+      async (args, extra) => {
+        try {
+          const result = await prepareCreateFolder(
+            userClient(extra.authInfo), extra.authInfo, args, writeOptions,
+          );
+          return respond(result, [
+            `elo_create_folder_commit with {"parentId":"${args.parentId}","name":"${args.name}","maskName":"${args.maskName}","confirmToken":"${result.confirmToken}","idempotencyKey":"<a unique id you choose>"} to create it`,
+          ]);
+        } catch (err) {
+          return asError(err);
+        }
+      },
+    );
+
+    server.registerTool(
+      'elo_create_folder_commit',
+      {
+        title: 'Create the previewed folder',
+        description:
+          'Creates the folder previewed by elo_create_folder. Needs that call\'s confirmToken and your own idempotencyKey; repeating a key returns the first result instead of creating a second folder.',
+        inputSchema: { ...CreateFolderInputSchema, ...CommitInputSchema },
+        annotations: writeAdditive,
+      },
+      async (args, extra) => {
+        try {
+          const result = await commitCreateFolder(userClient(extra.authInfo), extra.authInfo, args);
+          return respond(result, [
+            `elo_list_folder with {"folderId":"${result.objId}"} to confirm what is in it`,
+          ]);
+        } catch (err) {
+          return asError(err);
+        }
+      },
+    );
+
+    server.registerTool(
+      'elo_update_metadata',
+      {
+        title: 'Preview: change index fields',
+        description:
+          'Shows the current and the proposed value of every field that would change. Writes nothing. Returns a confirmToken for elo_update_metadata_commit.',
+        inputSchema: UpdateMetadataInputSchema,
+        annotations: readOnly,
+      },
+      async (args, extra) => {
+        try {
+          const result = await prepareUpdateMetadata(
+            userClient(extra.authInfo), extra.authInfo, args, writeOptions,
+          );
+          const real = result.changes.filter((c) => !c.unchanged);
+          return respond(
+            result,
+            real.length === 0
+              ? ['every field already holds the proposed value — there is nothing to change']
+              : [
+                  `elo_update_metadata_commit with {"objId":"${args.objId}","indexFields":${JSON.stringify(args.indexFields)},"confirmToken":"${result.confirmToken}","idempotencyKey":"<a unique id you choose>"} to REPLACE ${real.length} value(s)`,
+                ],
+          );
+        } catch (err) {
+          return asError(err);
+        }
+      },
+    );
+
+    server.registerTool(
+      'elo_update_metadata_commit',
+      {
+        title: 'Replace the previewed index fields',
+        description:
+          'Overwrites the index fields previewed by elo_update_metadata. The previous values are replaced. Needs that call\'s confirmToken and your own idempotencyKey.',
+        inputSchema: { ...UpdateMetadataInputSchema, ...CommitInputSchema },
+        annotations: writeDestructive,
+      },
+      async (args, extra) => {
+        try {
+          const result = await commitUpdateMetadata(userClient(extra.authInfo), extra.authInfo, args);
+          return respond(result, [
+            `elo_get_metadata with {"objId":"${result.objId}"} to read back what is stored now`,
+          ]);
+        } catch (err) {
+          return asError(err);
+        }
+      },
+    );
+  }
+
   return server;
 }
 
@@ -515,6 +665,15 @@ async function startHttp() {
 
     startStoreSweep();
     startEloSessionSweep();
+
+    if (cfg.ELO_WRITE_ENABLED) {
+      startPreflightSweep();
+      startIdempotencySweep();
+      logger.warn(
+        { roots: parseList(cfg.ELO_WRITE_ROOT_IDS), masks: parseList(cfg.ELO_WRITE_MASKS) },
+        'Write tools are ENABLED — signed-in users may create and change objects in these areas',
+      );
+    }
   }
 
   // One gate for both credentials. McpTokenVerifier accepts the shared secret
