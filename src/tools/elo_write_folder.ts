@@ -12,7 +12,7 @@ import {
 import { hashPayload, prepareWrite, consumeWrite } from '../write/preflight.js';
 import { onceOnly } from '../write/idempotency.js';
 import { withAudit } from '../write/audit.js';
-import { assertIsFolder, assertUnchanged, createFolder, fingerprint, readTarget } from '../write/operations.js';
+import { assertIsFolder, assertUnchanged, createFolder, fingerprint, readSnapshot } from '../write/operations.js';
 
 export const CreateFolderInputSchema = {
   parentId: z
@@ -59,7 +59,8 @@ export async function prepareCreateFolder(
   opts: WriteToolOptions,
 ) {
   const session = requireEloUser(authInfo);
-  const parent = await readTarget(client, args.parentId);
+  const parentSnapshot = await readSnapshot(client, args.parentId);
+  const parent = parentSnapshot.sord;
   assertIsFolder(parent);
   assertTargetAllowed(parent, opts.policy);
   assertMaskAllowed(args.maskName, opts.policy);
@@ -72,7 +73,7 @@ export async function prepareCreateFolder(
     clientId: authInfo!.clientId,
     payloadHash,
     targetId: args.parentId,
-    baseline: fingerprint(parent),
+    baseline: fingerprint(parentSnapshot),
   });
 
   return {

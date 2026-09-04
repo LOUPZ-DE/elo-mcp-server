@@ -7,7 +7,7 @@ import { assertFieldsAllowed, assertTargetAllowed } from '../write/policy.js';
 import { hashPayload, prepareWrite, consumeWrite } from '../write/preflight.js';
 import { onceOnly } from '../write/idempotency.js';
 import { withAudit } from '../write/audit.js';
-import { assertUnchanged, fingerprint, readTarget, updateMetadata } from '../write/operations.js';
+import { assertUnchanged, fingerprint, readSnapshot, updateMetadata } from '../write/operations.js';
 import type { WriteToolOptions } from './elo_write_folder.js';
 
 export const UpdateMetadataInputSchema = {
@@ -35,7 +35,8 @@ export async function prepareUpdateMetadata(
   opts: WriteToolOptions,
 ) {
   const session = requireEloUser(authInfo);
-  const target = await readTarget(client, args.objId);
+  const snapshot = await readSnapshot(client, args.objId);
+  const target = snapshot.sord;
   assertTargetAllowed(target, opts.policy);
   assertFieldsAllowed(args.indexFields, opts.policy);
 
@@ -54,7 +55,7 @@ export async function prepareUpdateMetadata(
     clientId: authInfo!.clientId,
     payloadHash,
     targetId: args.objId,
-    baseline: fingerprint(target),
+    baseline: fingerprint(snapshot),
   });
 
   return {

@@ -8,6 +8,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **A write MVP, off by default.** Four operations — create a folder, file a
+  document, check in a new version, change allowlisted index fields — behind
+  `ELO_WRITE_ENABLED` (default `false`). With it off the eight tools are not
+  registered and nothing about the server changes.
+
+  Two rules are in code rather than configuration. A write needs a personal
+  OAuth sign-in: the shared secret and the technical account stay read-only and
+  never serve as a fallback, because a change attributed to the technical
+  account is a change nobody made. And every change takes two calls — a preview
+  that writes nothing and issues a short-lived, single-use `confirmToken` bound
+  to the user, client, operation and payload hash, then a commit that accepts
+  only that token plus an idempotency key.
+
+  Target folders, masks, index fields, MIME types and sizes are server-side
+  allowlists; the target is checked against the object as ELO returns it, not
+  against anything the caller supplied. Enabling writing without `MCP_AUTH_MODE`
+  set to `oauth`/`both` and a non-empty root and mask list is a boot error.
+
+  Concurrency is optimistic. The preview records a fingerprint and the commit
+  re-reads it, so a change made in between aborts the write. The fingerprint
+  includes the document version identity, not just the change date: **checking
+  in a new version leaves `XDateIso` untouched** — measured against the live
+  instance, where it cost a failing test to find out — so the version-only case
+  would otherwise have slipped past unnoticed. Nothing is locked, and so nothing
+  can be left locked; the `LockC` bitmask values are not derivable from the
+  instance OpenAPI, and guessing one is worse than detecting a conflict.
+
+  Writes go through a new `EloClient.requestOnce()` without the session-expiry
+  replay that `request()` performs: a retried `checkinSord` would create a second
+  object. Uploads use `EloClient.upload()`, which re-anchors the URL IX returns
+  onto `ELO_BASE_URL` rather than sending credentials wherever the server points.
+
+  Every path — success, refusal, conflict, ELO error — writes an audit line with
+  index field **names** only. See [docs/writing.md](docs/writing.md).
+- **`nextSteps` in tool results.** Every answer names the follow-up calls that
+  make sense right there, with arguments already filled in, instead of leaving
+  the model to reconstruct them. Concrete and conditional: a step that does not
+  apply is omitted rather than hedged.
+
 - **`elo_whoami`.** Reports which ELO account the connection acts as. With
   `MCP_AUTH_MODE=both` one endpoint serves two very different callers — an OAuth
   user running under their own ELO rights, and an API-key caller running under
@@ -41,6 +80,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it wrong is silent — the server starts, serves no icon, and mentions it only
   in a line nobody reads. Several PNGs with no `icon.png` is genuinely
   ambiguous, so that warns and picks nothing.
+
+### Changed
+- **`openWorldHint` is now `false` on every tool.** An ELO archive is a closed,
+  known domain, not the open web. Worth naming rather than slipping in: it lowers
+  how cautiously a client treats these tools, which is a behaviour change for
+  existing connections.
+- **Server `instructions`** no longer open with "read-only view", and gain a
+  section on changing things — only when writing is enabled. Instructions for
+  tools that are not registered would have the model offering changes the server
+  cannot make.
 
 ### Fixed
 - **A client asking to authenticate with a secret could not register at all.**

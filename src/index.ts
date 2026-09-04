@@ -249,7 +249,28 @@ function summarizeRpc(body: unknown): {
 // One global rule beats repeating link policy in five tool descriptions: the
 // pilot's "sometimes the right ELO link, sometimes a link into a different
 // project" came from the model filling gaps from conversation context.
-const SERVER_INSTRUCTIONS = `This server exposes a read-only view of the ELO document archive.
+/**
+ * Only added when writing is switched on.
+ *
+ * Instructions for tools that are not registered would be worse than useless:
+ * the model would offer changes the server cannot make, and the tokens spent
+ * saying so are tokens not spent on the archive itself.
+ */
+const WRITE_INSTRUCTIONS = `
+
+Changing something in ELO:
+- Only when the user asked for a change. Never as a side effect of answering a question.
+- A change runs as the signed-in person, with their ELO permissions. There is no fallback account: if a write tool refuses for want of an identity, say so and stop.
+- Every change takes two calls. The first (elo_create_folder, elo_upload_document, elo_add_document_version, elo_update_metadata) writes NOTHING — it checks the request and returns a preview with a \`confirmToken\`. The second, the one ending in \`_commit\`, performs it.
+- Show the preview to the user and get their agreement before calling the commit tool. That preview is the only place they see what would change — above all for elo_update_metadata, which REPLACES existing field values rather than adding to them.
+- Pass the \`confirmToken\` exactly as issued, plus an \`idempotencyKey\` you choose. Send the same key again when retrying after a timeout: it returns the first result instead of creating a second object.
+- A token is valid once, for a few minutes, for that one payload. If it has expired, or the object changed in ELO meanwhile, prepare again — never retry the commit.
+- Target folders, masks, index fields, file types and sizes are restricted server-side. A refusal names what was not permitted; relay that instead of trying variations.
+- Nothing here deletes, moves, or re-permissions anything, and earlier document versions always remain.`;
+
+const SERVER_INSTRUCTIONS = `This server reads the ELO document archive${
+  cfg.ELO_WRITE_ENABLED ? ', and can add to it in four narrow ways under confirmation' : ' and never changes it'
+}.
 
 Link policy — this is not optional:
 - Every ELO link you output must be copied VERBATIM from the \`eloLink\` field of a tool result.
@@ -267,7 +288,9 @@ Completeness:
 
 Working through a question:
 - Tool answers are JSON. When an answer carries a \`nextSteps\` field, those are the follow-up calls that make sense right here, with their arguments already filled in — prefer them over reconstructing a call yourself.
-- The usual order for a project question is elo_find_project_folder → elo_list_folder → elo_get_document_content; \`nextSteps\` names the next one at each stage.`;
+- The usual order for a project question is elo_find_project_folder → elo_list_folder → elo_get_document_content; \`nextSteps\` names the next one at each stage.${
+  cfg.ELO_WRITE_ENABLED ? WRITE_INSTRUCTIONS : ''
+}`;
 
 function createServer(): McpServer {
   const icon = loadIcon();
@@ -288,7 +311,7 @@ function createServer(): McpServer {
   );
 
   /**
-   * Every tool here reads; none of them writes.
+   * Every tool carrying this annotation reads; none of them writes.
    *
    * All four are stated rather than left to default, because the spec defaults
    * are the opposite of what these tools are: an unannotated tool counts as

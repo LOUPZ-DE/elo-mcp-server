@@ -30,6 +30,25 @@ and it will do so inconsistently — hits from different projects are otherwise
 indistinguishable. The server's MCP `instructions` require links to be copied
 verbatim from tool output.
 
+### Writing — off by default
+
+Four further operations can be switched on: create a folder, file a document,
+check in a new version, change allowlisted index fields. They are absent from
+`tools/list` until `ELO_WRITE_ENABLED=true`, and two rules hold whenever they
+are present:
+
+- **A write needs a person.** Only a caller signed in with their own ELO account
+  over OAuth may write. The shared secret and the technical account stay
+  read-only, and there is no fallback — an unattributable change is worse than
+  no change.
+- **Every change takes two calls.** A preview writes nothing and returns what
+  would happen plus a short-lived, single-use `confirmToken`; the commit tool
+  accepts only that token plus an idempotency key.
+
+Target folders, masks, index fields, file types and sizes are server-side
+allowlists. Nothing deletes, moves, re-permissions or switches a mask. Details,
+limits and rollback: [docs/writing.md](docs/writing.md).
+
 ### Two search engines, one trade-off worth knowing
 
 ELO cannot combine full-text search with a folder restriction — the full-text
@@ -113,6 +132,7 @@ npm run test:http    # spawns the HTTP transport; auth, tools/list, SSE regressi
 npm run test:oauth   # offline; the whole OAuth + DCR flow against a stub IX server
 npm run test:live    # end-to-end against your real ELO instance (read-only)
 npm run probe        # read-only reconnaissance of IX runtime behaviour
+npm run test:live:write  # writes to a real ELO — refuses to run without a sandbox folder
 ```
 
 `test:live` discovers its own fixtures — it finds a project, lists it, searches
@@ -252,6 +272,10 @@ talking to ELO IX REST — and how they were resolved — see
   or a downstream system without an ELO session. Deliberately not built —
   it would expose archive documents on a URL that anyone holding the link can
   open, which is a decision for the archive owner rather than a default.
+
+- Beyond the write MVP: deleting, moving, permission and mask changes, workflow
+  control. Each needs a rollback story of its own before it is worth having, and
+  the MVP deliberately keeps to operations where the previous state survives.
 
 ## API references
 

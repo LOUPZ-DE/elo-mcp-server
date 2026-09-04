@@ -67,6 +67,8 @@ const ixCalls: IxCall[] = [];
 const ixSessions = new Map<string, string>();
 /** Objects the stub "archive" holds, so a write can be read back. */
 const ixObjects = new Map<string, Record<string, unknown>>();
+/** objId → the current document version, as checkoutDoc hands it back. */
+const ixVersions = new Map<string, Record<string, unknown>>();
 /** Every checkin, so a test can assert one object was created and not two. */
 const ixWrites: Array<{ endpoint: string; objId: string; user: string | undefined }> = [];
 /** Byte uploads, so a test can assert the URL was re-anchored, not followed. */
@@ -162,7 +164,12 @@ const ixServer = createServer(async (req, res) => {
   //
   // Spelled out rather than left to the catch-all below, which would answer
   // `{result:{}}` and make a write look like it succeeded while doing nothing.
-  if (endpoint.endsWith('/checkoutSord')) {
+  // checkoutDoc, not checkoutSord: the write path reads targets through the
+  // same call the read tools use, because it is the only one that returns the
+  // document versions the fingerprint needs. A new version does not move
+  // XDateIso, so without the version identity a concurrent checkin would slip
+  // past the conflict check — measured against the live instance.
+  if (endpoint.endsWith('/checkoutDoc') || endpoint.endsWith('/checkoutSord')) {
     const objId = String(body.objId ?? '');
     const sord = ixObjects.get(objId);
     if (!sord) {
@@ -170,7 +177,8 @@ const ixServer = createServer(async (req, res) => {
       json({ exception: { name: 'IXExceptionC', message: `[ELOIX:5023] Objekt ${objId} nicht gefunden` } });
       return;
     }
-    json({ result: { sord } });
+    const version = ixVersions.get(objId);
+    json({ result: { sord, ...(version ? { document: { objId, docs: [version] } } : {}) } });
     return;
   }
   if (endpoint.endsWith('/createSord')) {
@@ -229,6 +237,7 @@ const ixServer = createServer(async (req, res) => {
     const previous = ixObjects.get(objId);
     const versionNo = String(Number((previous?.version as string) ?? '0') + 1);
     ixWrites.push({ endpoint: 'checkinDocEnd', objId, user: sessionUserOf(req) });
+    ixVersions.set(objId, { ...version, version: versionNo });
     ixObjects.set(objId, {
       ...sord, id: objId, version: versionNo,
       // Checking a stream in makes the object a document. Without this the
@@ -899,6 +908,39 @@ async function main(): Promise<void> {
       'a second version lands on the same object, not a new one',
       (!versionBody.includes('"isError":true') && versionBody.includes(String(uploadedObjId))) ||
         `body ${versionBody.slice(0, 250)}`,
+    );
+
+    // A concurrent change between preview and confirmation must abort the
+    // commit. The case is deliberately the hard one: someone checks in a new
+    // version, which leaves XDateIso untouched — measured against the live
+    // instance, and the reason the fingerprint carries the version identity
+    // rather than the change date alone.
+    const conflictPrep = await rpc(tokens.access_token, 'tools/call', {
+      name: 'elo_add_document_version',
+      arguments: {
+        objId: uploadedObjId, fileName: 'bericht-v3.pdf',
+        contentType: 'application/pdf', contentBase64: pdf, versionComment: 'dritte Fassung',
+      },
+    });
+    const conflictToken = (await conflictPrep.text()).match(/\\"confirmToken\\":\s*\\"([^\\"]+)\\"/)?.[1];
+    const concurrent = ixVersions.get(String(uploadedObjId)) ?? {};
+    ixVersions.set(String(uploadedObjId), { ...concurrent, id: 'someone-else', version: '99' });
+    const uploadsBeforeConflict = ixUploads.length;
+    const conflicted = await rpc(tokens.access_token, 'tools/call', {
+      name: 'elo_add_document_version_commit',
+      arguments: {
+        objId: uploadedObjId, fileName: 'bericht-v3.pdf',
+        contentType: 'application/pdf', contentBase64: pdf, versionComment: 'dritte Fassung',
+        confirmToken: conflictToken, idempotencyKey: 'version-conflict',
+      },
+    });
+    const conflictedBody = await conflicted.text();
+    check(
+      'a version checked in between preview and commit aborts the write',
+      (conflictedBody.includes('"isError":true') &&
+        /changed in ELO/i.test(conflictedBody) &&
+        ixUploads.length === uploadsBeforeConflict) ||
+        `uploads ${ixUploads.length - uploadsBeforeConflict}, body ${conflictedBody.slice(0, 250)}`,
     );
 
     // --- Coexistence with the shared secret --------------------------------
