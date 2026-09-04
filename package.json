@@ -53,7 +53,8 @@
     "typecheck": "tsc --noEmit",
     "probe:accounts": "tsx scripts/probe-ix.ts --accounts",
     "probe:variants": "tsx scripts/probe-ix.ts --variants",
-    "test:oauth": "npm run build && tsx scripts/test-oauth.ts"
+    "test:oauth": "npm run build && tsx scripts/test-oauth.ts",
+    "test:live:write": "tsx scripts/test-live-write.ts"
   },
   "engines": {
     "node": ">=22"

@@ -1,12 +1,19 @@
 import { createHash } from 'node:crypto';
 import { EloClient } from '../elo/client.js';
-import { EDIT_INFO_Z_ALL, LOCK_Z_NO, SORD_Z_ALL, isFolder } from '../elo/constants.js';
+import {
+  DOC_VERSION_Z_ALL,
+  EDIT_INFO_Z_ALL,
+  LOCK_Z_NO,
+  SORD_Z_ALL,
+  isFolder,
+} from '../elo/constants.js';
 import { allIndexFields, refPathString } from '../elo/sord.js';
 import type {
   CheckinDocResponse,
   CheckinSordResponse,
   CheckoutResponse,
   CreateSordResponse,
+  EloDocVersion,
   EloObjKey,
   EloSord,
 } from '../elo/types.js';
@@ -23,17 +30,43 @@ import { WriteConflictError, WritePolicyError } from './errors.js';
 // place — this design takes no locks and detects conflicts by comparing the
 // object against what the preview showed.
 
-/** Reads a target and refuses anything that is not a usable folder/object. */
-export async function readTarget(client: EloClient, objId: string): Promise<EloSord> {
+/**
+ * What a target looked like when it was read — sord plus, for a document, its
+ * current version.
+ *
+ * The version is here because the fingerprint needs it. A live run showed
+ * `XDateIso` does NOT move when a new document version is checked in, so a
+ * fingerprint over the sord alone cannot notice that somebody added one — which
+ * is precisely the concurrent change `elo_add_document_version` has to catch.
+ */
+export interface TargetSnapshot {
+  sord: EloSord;
+  version?: EloDocVersion;
+}
+
+/**
+ * Reads a target and refuses anything this account cannot see.
+ *
+ * `checkoutDoc`, not `checkoutSord`: in this IX version the latter leaves the
+ * `sord` field empty regardless of editInfoZ (see the note in
+ * elo_get_metadata.ts), and it is the only call that returns the document
+ * versions the fingerprint needs.
+ */
+export async function readSnapshot(client: EloClient, objId: string): Promise<TargetSnapshot> {
   const response = await client.request<CheckoutResponse>(
-    '/rest/IXServicePortIF/checkoutSord',
-    { objId, editInfoZ: EDIT_INFO_Z_ALL, lockZ: LOCK_Z_NO },
+    '/rest/IXServicePortIF/checkoutDoc',
+    { objId, editInfoZ: EDIT_INFO_Z_ALL, docVersionZ: DOC_VERSION_Z_ALL, lockZ: LOCK_Z_NO },
   );
   const sord = response.result?.sord;
   if (!sord) {
     throw new WritePolicyError(`No object with objId ${objId} is readable for this account.`);
   }
-  return sord;
+  return { sord, version: response.result?.document?.docs?.[0] };
+}
+
+/** Convenience for the many places that only need the sord. */
+export async function readTarget(client: EloClient, objId: string): Promise<EloSord> {
+  return (await readSnapshot(client, objId)).sord;
 }
 
 export function assertIsFolder(sord: EloSord): void {
@@ -53,12 +86,18 @@ export function assertIsFolder(sord: EloSord): void {
  * that silently depends on one optional field is a fingerprint that stops
  * working when that field is absent.
  */
-export function fingerprint(sord: EloSord): string {
+export function fingerprint(snapshot: TargetSnapshot | EloSord): string {
+  const sord = 'sord' in snapshot ? snapshot.sord : snapshot;
+  const version = 'sord' in snapshot ? snapshot.version : undefined;
   const parts = {
     id: String(sord.id),
     changed: sord.XDateIso ?? sord.xDateIso ?? '',
     name: sord.name,
     fields: allIndexFields(sord),
+    // Measured, not assumed: checking in a new document version leaves
+    // XDateIso untouched, so without the version identity here a concurrent
+    // version would slip past the conflict check unnoticed.
+    version: version ? [version.id, version.version, version.md5].join('|') : '',
   };
   return createHash('sha256').update(JSON.stringify(parts)).digest('hex').slice(0, 32);
 }
@@ -74,14 +113,32 @@ export async function assertUnchanged(
   objId: string,
   baseline: string,
 ): Promise<EloSord> {
-  const current = await readTarget(client, objId);
+  const current = await readSnapshot(client, objId);
   if (fingerprint(current) !== baseline) {
     throw new WriteConflictError(
-      `"${current.name}" changed in ELO after the preview was made. Nothing was written. ` +
+      `"${current.sord.name}" changed in ELO after the preview was made. Nothing was written. ` +
         'Prepare the change again to see the current state.',
     );
   }
-  return current;
+  return current.sord;
+}
+
+/**
+ * Has this sord been stored yet?
+ *
+ * A template from `createSord` carries **`id: -1`** — measured against the live
+ * instance, and returned as a JSON *number* despite `EloSord.id` being typed as
+ * a string. `0` and an empty value are treated the same way for safety.
+ *
+ * This matters in exactly one place and cost a live run to find:
+ * `checkinSord` happily accepts `-1` and reads it as "store me", while
+ * `checkinDocBegin` takes `document.objId` literally and refuses with
+ * `[ELOIX:5023] Das Objekt mit der ID document[0].objId=-1 ist nicht vorhanden`.
+ * For a new document the field has to be omitted entirely.
+ */
+export function isUnsavedSord(sord: EloSord): boolean {
+  const id = String(sord.id ?? '');
+  return id === '' || id === '0' || id === '-1';
 }
 
 /** Merges field updates into a sord's objKeys, leaving untouched keys alone. */
@@ -179,7 +236,9 @@ async function checkinDocument(
     '/rest/IXServicePortIF/checkinDocBegin',
     {
       document: {
-        objId: sord.id && sord.id !== '0' ? sord.id : undefined,
+        // Omitted for a new document: see isUnsavedSord(). Sending the
+        // template's -1 makes IX look for an object with that id and refuse.
+        ...(isUnsavedSord(sord) ? {} : { objId: sord.id }),
         docs: [
           {
             ext: input.ext,
@@ -217,7 +276,7 @@ async function checkinDocument(
     },
   );
 
-  const objId = ended.result?.objId ?? (sord.id !== '0' ? sord.id : undefined);
+  const objId = ended.result?.objId ?? (isUnsavedSord(sord) ? undefined : sord.id);
   if (!objId) {
     throw new WritePolicyError('ELO accepted the document but returned no objId.');
   }

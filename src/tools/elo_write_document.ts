@@ -17,7 +17,7 @@ import {
   assertIsFolder,
   assertUnchanged,
   fingerprint,
-  readTarget,
+  readSnapshot,
   uploadDocument,
   type UploadTransport,
 } from '../write/operations.js';
@@ -95,7 +95,8 @@ export async function prepareUploadDocument(
 ) {
   const session = requireEloUser(authInfo);
   const bytes = decodeContent(args.contentBase64);
-  const parent = await readTarget(client, args.parentId);
+  const parentSnapshot = await readSnapshot(client, args.parentId);
+  const parent = parentSnapshot.sord;
   assertIsFolder(parent);
   assertTargetAllowed(parent, opts.policy);
   assertMaskAllowed(args.maskName, opts.policy);
@@ -108,7 +109,7 @@ export async function prepareUploadDocument(
     clientId: authInfo!.clientId,
     payloadHash: hashPayload(args),
     targetId: args.parentId,
-    baseline: fingerprint(parent),
+    baseline: fingerprint(parentSnapshot),
   });
 
   return {
@@ -185,7 +186,8 @@ export async function prepareAddVersion(
 ) {
   const session = requireEloUser(authInfo);
   const bytes = decodeContent(args.contentBase64);
-  const target = await readTarget(client, args.objId);
+  const snapshot = await readSnapshot(client, args.objId);
+  const target = snapshot.sord;
   assertTargetAllowed(target, opts.policy);
   assertFileAllowed(args.contentType, bytes.length, opts.policy);
 
@@ -195,7 +197,7 @@ export async function prepareAddVersion(
     clientId: authInfo!.clientId,
     payloadHash: hashPayload(args),
     targetId: args.objId,
-    baseline: fingerprint(target),
+    baseline: fingerprint(snapshot),
   });
 
   return {
