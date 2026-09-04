@@ -3,6 +3,7 @@ import { EloClient } from '../elo/client.js';
 import { EDIT_INFO_Z_ALL, LOCK_Z_NO, SORD_Z_ALL, isFolder } from '../elo/constants.js';
 import { allIndexFields, refPathString } from '../elo/sord.js';
 import type {
+  CheckinDocResponse,
   CheckinSordResponse,
   CheckoutResponse,
   CreateSordResponse,
@@ -139,6 +140,144 @@ export async function createFolder(
     throw new WritePolicyError('ELO accepted the folder but returned no objId.');
   }
   return { objId: String(objId), name: input.name };
+}
+
+export interface UploadInput {
+  /** Bytes already decoded from whatever the caller sent. */
+  bytes: Buffer;
+  fileName: string;
+  contentType: string;
+  /** Extension without the dot; ELO stores it separately from the MIME type. */
+  ext: string;
+  versionComment?: string;
+}
+
+export interface UploadTransport {
+  maxBytes: number;
+  timeoutMs: number;
+}
+
+/**
+ * The three-step document checkin: begin → send bytes → end.
+ *
+ * `checkinDocBegin` reserves a version and answers with the URL the bytes go
+ * to. What comes back from that upload is an opaque id which
+ * `checkinDocEnd` needs in `docs[0].uploadResult` — without it ELO has a
+ * version record pointing at nothing.
+ *
+ * The upload URL is a short-lived capability and never logged. It also points
+ * at the internal host in this deployment (BUGFIXES #10), which is why
+ * `EloClient.upload` re-anchors it rather than using it as given.
+ */
+async function checkinDocument(
+  client: EloClient,
+  sord: EloSord,
+  input: UploadInput,
+  transport: UploadTransport,
+): Promise<{ objId: string; version?: string }> {
+  const begun = await client.requestOnce<CheckinDocResponse>(
+    '/rest/IXServicePortIF/checkinDocBegin',
+    {
+      document: {
+        objId: sord.id && sord.id !== '0' ? sord.id : undefined,
+        docs: [
+          {
+            ext: input.ext,
+            contentType: input.contentType,
+            ...(input.versionComment ? { comment: input.versionComment } : {}),
+          },
+        ],
+      },
+    },
+  );
+
+  const version = begun.result?.docs?.[0];
+  if (!version?.url) {
+    throw new WritePolicyError(
+      'ELO did not return an upload URL for this document, so the file cannot be stored.',
+    );
+  }
+
+  const uploadResult = await client.upload(version.url, input.bytes, {
+    maxBytes: transport.maxBytes,
+    timeoutMs: transport.timeoutMs,
+    contentType: input.contentType,
+  });
+
+  const ended = await client.requestOnce<CheckinDocResponse>(
+    '/rest/IXServicePortIF/checkinDocEnd',
+    {
+      sord,
+      document: {
+        ...begun.result,
+        docs: [{ ...version, uploadResult }],
+      },
+      sordZ: SORD_Z_ALL,
+      unlockZ: LOCK_Z_NO,
+    },
+  );
+
+  const objId = ended.result?.objId ?? (sord.id !== '0' ? sord.id : undefined);
+  if (!objId) {
+    throw new WritePolicyError('ELO accepted the document but returned no objId.');
+  }
+  return { objId: String(objId), version: ended.result?.docs?.[0]?.version };
+}
+
+export interface UploadDocumentInput extends UploadInput {
+  parentId: string;
+  name: string;
+  maskName: string;
+  indexFields?: Record<string, string>;
+}
+
+/** createSord → fill → checkinDoc{Begin,End}. A brand-new document. */
+export async function uploadDocument(
+  client: EloClient,
+  input: UploadDocumentInput,
+  transport: UploadTransport,
+): Promise<{ objId: string; name: string; version?: string }> {
+  const created = await client.requestOnce<CreateSordResponse>(
+    '/rest/IXServicePortIF/createSord',
+    { parentId: input.parentId, maskId: input.maskName, editInfoZ: EDIT_INFO_Z_ALL },
+  );
+  const template = created.result?.sord;
+  if (!template) {
+    throw new WritePolicyError(
+      `ELO returned no template for mask "${input.maskName}" — check that the mask exists and this account may use it.`,
+    );
+  }
+
+  const sord: EloSord = {
+    ...template,
+    name: input.name,
+    objKeys: input.indexFields ? applyIndexFields(template, input.indexFields) : template.objKeys,
+  };
+
+  const { objId, version } = await checkinDocument(client, sord, input, transport);
+  return { objId, name: input.name, version };
+}
+
+/**
+ * A further version of an existing document.
+ *
+ * Additive: ELO keeps the previous versions, which is why the commit tool for
+ * this is annotated `destructiveHint: false`. The caller has already verified
+ * the fingerprint, so `current` is the sord that check returned.
+ */
+export async function addDocumentVersion(
+  client: EloClient,
+  current: EloSord,
+  input: UploadInput,
+  transport: UploadTransport,
+): Promise<{ objId: string; name: string; version?: string; path?: string }> {
+  if (isFolder(current.type)) {
+    throw new WritePolicyError(
+      `"${current.name}" is a folder — a folder has no document versions.`,
+    );
+  }
+  const { objId, version } = await checkinDocument(client, current, input, transport);
+  return { objId, name: current.name, version, path: refPathString(current) };
 }
 
 /**
