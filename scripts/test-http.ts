@@ -167,6 +167,21 @@ async function main(): Promise<void> {
     },
   );
 
+  // ELO_WRITE_ENABLED is unset here. A disabled write tool is not advertised at
+  // all, so a read-only deployment's clients never see one — the same promise
+  // the OAuth routes make below.
+  await check(
+    'default mode: no write tool is advertised',
+    () => jsonRpc('tools/list', {}, 30),
+    (r, body) => {
+      if (r.status !== 200) return `status ${r.status}`;
+      const leaked = ['elo_create_folder', 'elo_update_metadata', '_commit'].filter((n) =>
+        body.includes(n),
+      );
+      return leaked.length === 0 || `tools/list mentions ${leaked.join(', ')}`;
+    },
+  );
+
   await check(
     'default mode: no protected-resource document is published',
     () => fetch(`${BASE}/.well-known/oauth-protected-resource`),

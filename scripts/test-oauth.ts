@@ -65,6 +65,17 @@ interface IxCall {
 
 const ixCalls: IxCall[] = [];
 const ixSessions = new Map<string, string>();
+/** Objects the stub "archive" holds, so a write can be read back. */
+const ixObjects = new Map<string, Record<string, unknown>>();
+/** objId → the current document version, as checkoutDoc hands it back. */
+const ixVersions = new Map<string, Record<string, unknown>>();
+/** Every checkin, so a test can assert one object was created and not two. */
+const ixWrites: Array<{ endpoint: string; objId: string; user: string | undefined }> = [];
+/** Byte uploads, so a test can assert the URL was re-anchored, not followed. */
+const ixUploads: Array<{ path: string; bytes: number; basicUser: string | undefined }> = [];
+let ixDocCounter = 0;
+let ixSordCounter = 0;
+let ixCheckinCounter = 0;
 let ixSessionCounter = 0;
 
 function basicUserOf(req: IncomingMessage): string | undefined {
@@ -148,6 +159,105 @@ const ixServer = createServer(async (req, res) => {
     json({ result: { id: '42', name: END_USER, desc: 'Test User' } });
     return;
   }
+
+  // --- Write endpoints -------------------------------------------------------
+  //
+  // Spelled out rather than left to the catch-all below, which would answer
+  // `{result:{}}` and make a write look like it succeeded while doing nothing.
+  // checkoutDoc, not checkoutSord: the write path reads targets through the
+  // same call the read tools use, because it is the only one that returns the
+  // document versions the fingerprint needs. A new version does not move
+  // XDateIso, so without the version identity a concurrent checkin would slip
+  // past the conflict check — measured against the live instance.
+  if (endpoint.endsWith('/checkoutDoc') || endpoint.endsWith('/checkoutSord')) {
+    const objId = String(body.objId ?? '');
+    const sord = ixObjects.get(objId);
+    if (!sord) {
+      // How IX really refuses: HTTP 200 with an exception body (BUGFIXES #1).
+      json({ exception: { name: 'IXExceptionC', message: `[ELOIX:5023] Objekt ${objId} nicht gefunden` } });
+      return;
+    }
+    const version = ixVersions.get(objId);
+    json({ result: { sord, ...(version ? { document: { objId, docs: [version] } } : {}) } });
+    return;
+  }
+  if (endpoint.endsWith('/createSord')) {
+    // Persists nothing — a template only, exactly as the real createSord does.
+    json({
+      result: {
+        sord: {
+          id: '0', name: '', type: 4, maskName: String(body.maskId ?? ''),
+          parentId: String(body.parentId ?? ''), objKeys: [],
+        },
+      },
+    });
+    return;
+  }
+  if (endpoint.endsWith('/checkinSord')) {
+    const sord = (body.sord ?? {}) as Record<string, unknown>;
+    const existing = String(sord.id ?? '0');
+    const objId = existing !== '0' && existing !== '' ? existing : `9${++ixSordCounter}`;
+    ixWrites.push({ endpoint: 'checkinSord', objId, user: sessionUserOf(req) });
+    ixObjects.set(objId, {
+      ...sord, id: objId,
+      // Every checkin moves the change date; that is what makes the optimistic
+      // conflict check able to notice a concurrent edit.
+      XDateIso: `2026090${++ixCheckinCounter}120000`,
+    });
+    json({ result: Number(objId) });
+    return;
+  }
+
+  if (endpoint.endsWith('/checkinDocBegin')) {
+    const doc = (body.document ?? {}) as Record<string, unknown>;
+    const requested = ((doc.docs as Record<string, unknown>[]) ?? [])[0] ?? {};
+    // The URL deliberately names a host we are NOT configured for. The real IX
+    // does the same (BUGFIXES #10), and EloClient.upload must re-anchor it onto
+    // ELO_BASE_URL rather than send credentials wherever the server points.
+    json({
+      result: {
+        objId: doc.objId,
+        docs: [{ ...requested, id: `${++ixDocCounter}`, url: `http://internal-elo.invalid:9090/upload/${ixDocCounter}` }],
+      },
+    });
+    return;
+  }
+  if (endpoint.endsWith('/checkinDocEnd')) {
+    const sord = (body.sord ?? {}) as Record<string, unknown>;
+    const doc = (body.document ?? {}) as Record<string, unknown>;
+    const version = ((doc.docs as Record<string, unknown>[]) ?? [])[0] ?? {};
+    if (!version.uploadResult) {
+      // Without the upload result ELO would have a version record pointing at
+      // nothing; refusing here is what makes the three-step order testable.
+      json({ exception: { name: 'IXExceptionC', message: '[ELOIX:5000] uploadResult fehlt' } });
+      return;
+    }
+    const existing = String(sord.id ?? '0');
+    const objId = existing !== '0' && existing !== '' ? existing : `8${++ixSordCounter}`;
+    const previous = ixObjects.get(objId);
+    const versionNo = String(Number((previous?.version as string) ?? '0') + 1);
+    ixWrites.push({ endpoint: 'checkinDocEnd', objId, user: sessionUserOf(req) });
+    ixVersions.set(objId, { ...version, version: versionNo });
+    ixObjects.set(objId, {
+      ...sord, id: objId, version: versionNo,
+      // Checking a stream in makes the object a document. Without this the
+      // stub would keep the folder type createSord handed out, and adding a
+      // second version to it would be refused — as it just was.
+      type: 254,
+      XDateIso: `2026090${++ixCheckinCounter}120000`,
+    });
+    json({ result: { objId, docs: [{ ...version, version: versionNo }] } });
+    return;
+  }
+  // The document manager's upload endpoint: not part of the IX REST surface, so
+  // it is matched on path rather than method name. Answers a plain string.
+  if (endpoint.startsWith('/upload/')) {
+    ixUploads.push({ path: endpoint, bytes: Buffer.byteLength(raw), basicUser: basicUserOf(req) });
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    res.end(`upload-${endpoint.split('/').pop()}`);
+    return;
+  }
+
   json({ result: {} });
 });
 
@@ -250,6 +360,12 @@ async function startServer(encryptionKey = STATE_KEY): Promise<ChildProcess> {
       // is only meaningful if the vault TTL is something the cookie could have
       // inherited and visibly did not.
       ELO_USER_SESSION_TTL: '2592000',
+      // Writing on, confined to the sandbox object the stub archive holds.
+      ELO_WRITE_ENABLED: 'true',
+      ELO_WRITE_ROOT_IDS: SANDBOX_ID,
+      ELO_WRITE_MASKS: 'Ordner',
+      ELO_WRITE_FIELDS: 'PRJ_NO,PRJ_NAME',
+      ELO_WRITE_MIME_TYPES: 'application/pdf',
       STATE_FILE,
       STATE_ENCRYPTION_KEY: encryptionKey,
       ELO_BASE_URL: `http://127.0.0.1:${IX_PORT}`,
@@ -264,6 +380,14 @@ async function startServer(encryptionKey = STATE_KEY): Promise<ChildProcess> {
   if (booted !== true) throw new Error(`MCP server did not start: ${booted}`);
   return child;
 }
+
+// The sandbox the write policy is pointed at in these tests.
+const SANDBOX_ID = '567085';
+ixObjects.set(SANDBOX_ID, {
+  id: SANDBOX_ID, name: 'Temporärer Testbereich MCP', type: 4, maskName: 'Ordner',
+  parentId: '548303', objKeys: [], XDateIso: '20260901120000',
+  refPaths: [{ path: [{ id: '1', name: 'IT' }, { id: '548303', name: 'IT-Sicherheit' }] }],
+});
 
 async function main(): Promise<void> {
   await new Promise<void>((resolve) => ixServer.listen(IX_PORT, '127.0.0.1', resolve));
@@ -581,6 +705,242 @@ async function main(): Promise<void> {
         whoamiSharedBody.includes(TECH_USER) &&
         !whoamiSharedBody.includes(END_USER)) ||
         `status ${whoamiShared.status}, body ${whoamiSharedBody.slice(0, 250)}`,
+    );
+
+    // --- Writing -----------------------------------------------------------
+    //
+    // The rule the whole design rests on: a write needs a person. The shared
+    // secret runs as the technical account, so a write through it would be
+    // attributed to the wrong identity — and withEloClient cannot tell that
+    // caller apart from stdio, which is why the guard looks at AuthInfo itself.
+    const writeAsApiKey = await rpc(SHARED_SECRET, 'tools/call', {
+      name: 'elo_create_folder',
+      arguments: { parentId: SANDBOX_ID, name: 'Sollte nicht entstehen', maskName: 'Ordner' },
+    });
+    const writeAsApiKeyBody = await writeAsApiKey.text();
+    check(
+      'the shared secret cannot reach a write tool',
+      (writeAsApiKeyBody.includes('"isError":true') &&
+        /read-only|Sign in with OAuth/i.test(writeAsApiKeyBody)) ||
+        `body ${writeAsApiKeyBody.slice(0, 250)}`,
+    );
+
+    const writesBefore = ixWrites.length;
+    const prepared = await rpc(tokens.access_token, 'tools/call', {
+      name: 'elo_create_folder',
+      arguments: { parentId: SANDBOX_ID, name: 'Neuer Testordner', maskName: 'Ordner' },
+    });
+    const preparedBody = await prepared.text();
+    const confirmToken = preparedBody.match(/\\"confirmToken\\":\s*\\"([^\\"]+)\\"/)?.[1];
+    check(
+      'preparing shows a preview, issues a token, and writes nothing',
+      (confirmToken !== undefined &&
+        ixWrites.length === writesBefore &&
+        preparedBody.includes('Nothing has been written')) ||
+        `token ${String(confirmToken)}, writes ${ixWrites.length - writesBefore}`,
+    );
+
+    // Outside the sandbox: refused at preview, so nobody ever confirms
+    // something that was never going to work.
+    const outside = await rpc(tokens.access_token, 'tools/call', {
+      name: 'elo_create_folder',
+      arguments: { parentId: '548303', name: 'Im Produktivbereich', maskName: 'Ordner' },
+    });
+    const outsideBody = await outside.text();
+    check(
+      'a target outside the configured area is refused before any token exists',
+      (outsideBody.includes('"isError":true') && !outsideBody.includes('confirmToken')) ||
+        `body ${outsideBody.slice(0, 250)}`,
+    );
+
+    const committed = await rpc(tokens.access_token, 'tools/call', {
+      name: 'elo_create_folder_commit',
+      arguments: {
+        parentId: SANDBOX_ID, name: 'Neuer Testordner', maskName: 'Ordner',
+        confirmToken, idempotencyKey: 'test-key-1',
+      },
+    });
+    const committedBody = await committed.text();
+    check(
+      'committing with the token creates exactly one object',
+      (!committedBody.includes('"isError":true') && ixWrites.length === writesBefore + 1) ||
+        `writes ${ixWrites.length - writesBefore}, body ${committedBody.slice(0, 250)}`,
+    );
+    check(
+      'the write ran on the user session, not the technical account',
+      ixWrites[ixWrites.length - 1]?.user === END_USER ||
+        `ran as ${String(ixWrites[ixWrites.length - 1]?.user)}`,
+    );
+
+    // The token is spent. This is what stops a replayed confirmation.
+    const spentAgain = await rpc(tokens.access_token, 'tools/call', {
+      name: 'elo_create_folder_commit',
+      arguments: {
+        parentId: SANDBOX_ID, name: 'Neuer Testordner', maskName: 'Ordner',
+        confirmToken, idempotencyKey: 'test-key-2',
+      },
+    });
+    const spentAgainBody = await spentAgain.text();
+    check(
+      'the same confirmation cannot be spent twice',
+      (spentAgainBody.includes('"isError":true') &&
+        /already been used|unknown/i.test(spentAgainBody) &&
+        ixWrites.length === writesBefore + 1) ||
+        `writes ${ixWrites.length - writesBefore}, body ${spentAgainBody.slice(0, 200)}`,
+    );
+
+    // A duplicate that is not a replayed token but a retried request: same
+    // idempotency key, fresh confirmation. One object, not two.
+    const retryPrepare = await rpc(tokens.access_token, 'tools/call', {
+      name: 'elo_create_folder',
+      arguments: { parentId: SANDBOX_ID, name: 'Wiederholung', maskName: 'Ordner' },
+    });
+    const retryToken = (await retryPrepare.text()).match(/\\"confirmToken\\":\s*\\"([^\\"]+)\\"/)?.[1];
+    const beforeRetry = ixWrites.length;
+    for (const _ of [1, 2]) {
+      await rpc(tokens.access_token, 'tools/call', {
+        name: 'elo_create_folder_commit',
+        arguments: {
+          parentId: SANDBOX_ID, name: 'Wiederholung', maskName: 'Ordner',
+          confirmToken: retryToken, idempotencyKey: 'retry-key',
+        },
+      });
+    }
+    check(
+      'a repeated idempotency key does not create a second object',
+      ixWrites.length === beforeRetry + 1 || `created ${ixWrites.length - beforeRetry}`,
+    );
+
+    // --- Documents ----------------------------------------------------------
+    const pdf = Buffer.from('%PDF-1.4 pretend document').toString('base64');
+    const uploadsBefore = ixUploads.length;
+
+    const badType = await rpc(tokens.access_token, 'tools/call', {
+      name: 'elo_upload_document',
+      arguments: {
+        parentId: SANDBOX_ID, name: 'Bild', maskName: 'Ordner',
+        fileName: 'bild.png', contentType: 'image/png', contentBase64: pdf,
+      },
+    });
+    const badTypeBody = await badType.text();
+    check(
+      'a disallowed MIME type is refused before anything is uploaded',
+      (badTypeBody.includes('"isError":true') &&
+        /may not be uploaded/i.test(badTypeBody) &&
+        ixUploads.length === uploadsBefore) ||
+        `uploads ${ixUploads.length - uploadsBefore}, body ${badTypeBody.slice(0, 200)}`,
+    );
+
+    const badBase64 = await rpc(tokens.access_token, 'tools/call', {
+      name: 'elo_upload_document',
+      arguments: {
+        parentId: SANDBOX_ID, name: 'Kaputt', maskName: 'Ordner',
+        fileName: 'x.pdf', contentType: 'application/pdf', contentBase64: 'not base64 !!!',
+      },
+    });
+    check(
+      'content that is not valid base64 is refused rather than silently truncated',
+      // Buffer.from(x,'base64') drops invalid characters without complaining,
+      // so a corrupt argument would otherwise arrive as a short, plausible file.
+      (await badBase64.text()).includes('not valid base64') || 'accepted invalid base64',
+    );
+
+    const uploadPrep = await rpc(tokens.access_token, 'tools/call', {
+      name: 'elo_upload_document',
+      arguments: {
+        parentId: SANDBOX_ID, name: 'Testbericht', maskName: 'Ordner',
+        fileName: 'bericht.pdf', contentType: 'application/pdf', contentBase64: pdf,
+      },
+    });
+    const uploadToken = (await uploadPrep.text()).match(/\\"confirmToken\\":\s*\\"([^\\"]+)\\"/)?.[1];
+    const uploadCommit = await rpc(tokens.access_token, 'tools/call', {
+      name: 'elo_upload_document_commit',
+      arguments: {
+        parentId: SANDBOX_ID, name: 'Testbericht', maskName: 'Ordner',
+        fileName: 'bericht.pdf', contentType: 'application/pdf', contentBase64: pdf,
+        confirmToken: uploadToken, idempotencyKey: 'upload-1',
+      },
+    });
+    const uploadBody = await uploadCommit.text();
+    const uploadedObjId = uploadBody.match(/\\"objId\\":\s*\\"([^\\"]+)\\"/)?.[1];
+    check(
+      'a document is filed: begin, bytes, end',
+      (!uploadBody.includes('"isError":true') &&
+        ixUploads.length === uploadsBefore + 1 &&
+        uploadedObjId !== undefined) ||
+        `uploads ${ixUploads.length - uploadsBefore}, body ${uploadBody.slice(0, 250)}`,
+    );
+
+    // checkinDocBegin hands back a URL on an internal host we are not
+    // configured for. EloClient.upload must re-anchor it onto ELO_BASE_URL
+    // instead of sending three credentials wherever the server points.
+    check(
+      'the upload URL is re-anchored onto the configured host, not followed',
+      (ixUploads[ixUploads.length - 1]?.bytes ?? 0) > 0 ||
+        'the bytes never reached the configured host',
+    );
+    check(
+      'the upload carries the technical Basic Auth, like every other call',
+      ixUploads[ixUploads.length - 1]?.basicUser === TECH_USER ||
+        `Basic Auth user was "${String(ixUploads[ixUploads.length - 1]?.basicUser)}"`,
+    );
+
+    // A second version. Additive — which is why the commit tool for it is
+    // annotated destructiveHint:false.
+    const versionPrep = await rpc(tokens.access_token, 'tools/call', {
+      name: 'elo_add_document_version',
+      arguments: {
+        objId: uploadedObjId, fileName: 'bericht-v2.pdf',
+        contentType: 'application/pdf', contentBase64: pdf, versionComment: 'zweite Fassung',
+      },
+    });
+    const versionToken = (await versionPrep.text()).match(/\\"confirmToken\\":\s*\\"([^\\"]+)\\"/)?.[1];
+    const versionCommit = await rpc(tokens.access_token, 'tools/call', {
+      name: 'elo_add_document_version_commit',
+      arguments: {
+        objId: uploadedObjId, fileName: 'bericht-v2.pdf',
+        contentType: 'application/pdf', contentBase64: pdf, versionComment: 'zweite Fassung',
+        confirmToken: versionToken, idempotencyKey: 'version-1',
+      },
+    });
+    const versionBody = await versionCommit.text();
+    check(
+      'a second version lands on the same object, not a new one',
+      (!versionBody.includes('"isError":true') && versionBody.includes(String(uploadedObjId))) ||
+        `body ${versionBody.slice(0, 250)}`,
+    );
+
+    // A concurrent change between preview and confirmation must abort the
+    // commit. The case is deliberately the hard one: someone checks in a new
+    // version, which leaves XDateIso untouched — measured against the live
+    // instance, and the reason the fingerprint carries the version identity
+    // rather than the change date alone.
+    const conflictPrep = await rpc(tokens.access_token, 'tools/call', {
+      name: 'elo_add_document_version',
+      arguments: {
+        objId: uploadedObjId, fileName: 'bericht-v3.pdf',
+        contentType: 'application/pdf', contentBase64: pdf, versionComment: 'dritte Fassung',
+      },
+    });
+    const conflictToken = (await conflictPrep.text()).match(/\\"confirmToken\\":\s*\\"([^\\"]+)\\"/)?.[1];
+    const concurrent = ixVersions.get(String(uploadedObjId)) ?? {};
+    ixVersions.set(String(uploadedObjId), { ...concurrent, id: 'someone-else', version: '99' });
+    const uploadsBeforeConflict = ixUploads.length;
+    const conflicted = await rpc(tokens.access_token, 'tools/call', {
+      name: 'elo_add_document_version_commit',
+      arguments: {
+        objId: uploadedObjId, fileName: 'bericht-v3.pdf',
+        contentType: 'application/pdf', contentBase64: pdf, versionComment: 'dritte Fassung',
+        confirmToken: conflictToken, idempotencyKey: 'version-conflict',
+      },
+    });
+    const conflictedBody = await conflicted.text();
+    check(
+      'a version checked in between preview and commit aborts the write',
+      (conflictedBody.includes('"isError":true') &&
+        /changed in ELO/i.test(conflictedBody) &&
+        ixUploads.length === uploadsBeforeConflict) ||
+        `uploads ${ixUploads.length - uploadsBeforeConflict}, body ${conflictedBody.slice(0, 250)}`,
     );
 
     // --- Coexistence with the shared secret --------------------------------

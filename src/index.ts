@@ -42,6 +42,38 @@ import { rateLimit } from './utils/rateLimit.js';
 import { ensureStateWritable, flushState, loadState } from './utils/stateFile.js';
 import { iconSrc, loadIcon } from './utils/icon.js';
 import { eloWhoAmI } from './tools/elo_whoami.js';
+import { respond } from './mcp/respond.js';
+import {
+  nextStepsForDocumentContent,
+  nextStepsForListFolder,
+  nextStepsForMetadata,
+  nextStepsForProjectFolder,
+  nextStepsForSearch,
+  nextStepsForWhoAmI,
+} from './mcp/nextSteps.js';
+import { requireEloUser } from './write/guard.js';
+import { parseList, type WritePolicy } from './write/policy.js';
+import { startPreflightSweep } from './write/preflight.js';
+import { startIdempotencySweep } from './write/idempotency.js';
+import {
+  CreateFolderInputSchema,
+  CommitInputSchema,
+  prepareCreateFolder,
+  commitCreateFolder,
+} from './tools/elo_write_folder.js';
+import {
+  UpdateMetadataInputSchema,
+  prepareUpdateMetadata,
+  commitUpdateMetadata,
+} from './tools/elo_write_metadata.js';
+import {
+  UploadDocumentInputSchema,
+  AddVersionInputSchema,
+  prepareUploadDocument,
+  commitUploadDocument,
+  prepareAddVersion,
+  commitAddVersion,
+} from './tools/elo_write_document.js';
 
 let cfg: ReturnType<typeof loadConfig>;
 try {
@@ -150,6 +182,16 @@ const contentOptions = {
   timeoutMs: cfg.ELO_DOWNLOAD_TIMEOUT_MS,
 };
 
+// Allowlists for the write MVP. Empty lists permit nothing; loadConfig()
+// refuses to start with writing enabled and no target root.
+const writePolicy: WritePolicy = {
+  rootIds: parseList(cfg.ELO_WRITE_ROOT_IDS),
+  masks: parseList(cfg.ELO_WRITE_MASKS),
+  fields: parseList(cfg.ELO_WRITE_FIELDS),
+  mimeTypes: parseList(cfg.ELO_WRITE_MIME_TYPES).map((m) => m.toLowerCase()),
+  maxBytes: cfg.ELO_WRITE_MAX_BYTES,
+};
+
 /** Serialises document downloads so parallel large files cannot exhaust memory. */
 const withContentSlot = createSemaphore(cfg.ELO_CONTENT_CONCURRENCY);
 
@@ -164,11 +206,6 @@ const listingOptions = {
   ],
 };
 
-function asTextResult(payload: unknown) {
-  return {
-    content: [{ type: 'text' as const, text: JSON.stringify(payload, null, 2) }],
-  };
-}
 
 function asError(err: unknown) {
   const msg = err instanceof Error ? err.message : String(err);
@@ -212,7 +249,28 @@ function summarizeRpc(body: unknown): {
 // One global rule beats repeating link policy in five tool descriptions: the
 // pilot's "sometimes the right ELO link, sometimes a link into a different
 // project" came from the model filling gaps from conversation context.
-const SERVER_INSTRUCTIONS = `This server exposes a read-only view of the ELO document archive.
+/**
+ * Only added when writing is switched on.
+ *
+ * Instructions for tools that are not registered would be worse than useless:
+ * the model would offer changes the server cannot make, and the tokens spent
+ * saying so are tokens not spent on the archive itself.
+ */
+const WRITE_INSTRUCTIONS = `
+
+Changing something in ELO:
+- Only when the user asked for a change. Never as a side effect of answering a question.
+- A change runs as the signed-in person, with their ELO permissions. There is no fallback account: if a write tool refuses for want of an identity, say so and stop.
+- Every change takes two calls. The first (elo_create_folder, elo_upload_document, elo_add_document_version, elo_update_metadata) writes NOTHING — it checks the request and returns a preview with a \`confirmToken\`. The second, the one ending in \`_commit\`, performs it.
+- Show the preview to the user and get their agreement before calling the commit tool. That preview is the only place they see what would change — above all for elo_update_metadata, which REPLACES existing field values rather than adding to them.
+- Pass the \`confirmToken\` exactly as issued, plus an \`idempotencyKey\` you choose. Send the same key again when retrying after a timeout: it returns the first result instead of creating a second object.
+- A token is valid once, for a few minutes, for that one payload. If it has expired, or the object changed in ELO meanwhile, prepare again — never retry the commit.
+- Target folders, masks, index fields, file types and sizes are restricted server-side. A refusal names what was not permitted; relay that instead of trying variations.
+- Nothing here deletes, moves, or re-permissions anything, and earlier document versions always remain.`;
+
+const SERVER_INSTRUCTIONS = `This server reads the ELO document archive${
+  cfg.ELO_WRITE_ENABLED ? ', and can add to it in four narrow ways under confirmation' : ' and never changes it'
+}.
 
 Link policy — this is not optional:
 - Every ELO link you output must be copied VERBATIM from the \`eloLink\` field of a tool result.
@@ -226,7 +284,13 @@ Identifying the right object:
 
 Completeness:
 - Results carry \`truncated\` and a \`note\`. When \`truncated\` is true the list is incomplete — never present it as exhaustive, and never call the first entry "the latest" or "the only" one.
-- Every result is filtered by the ELO permissions of the account this connection signed in as. A document you cannot see may still exist. Say "I did not find it" — never "it does not exist in ELO".`;
+- Every result is filtered by the ELO permissions of the account this connection signed in as. A document you cannot see may still exist. Say "I did not find it" — never "it does not exist in ELO".
+
+Working through a question:
+- Tool answers are JSON. When an answer carries a \`nextSteps\` field, those are the follow-up calls that make sense right here, with their arguments already filled in — prefer them over reconstructing a call yourself.
+- The usual order for a project question is elo_find_project_folder → elo_list_folder → elo_get_document_content; \`nextSteps\` names the next one at each stage.${
+  cfg.ELO_WRITE_ENABLED ? WRITE_INSTRUCTIONS : ''
+}`;
 
 function createServer(): McpServer {
   const icon = loadIcon();
@@ -246,12 +310,23 @@ function createServer(): McpServer {
     { instructions: SERVER_INSTRUCTIONS },
   );
 
-  /** Every tool here reads; none of them writes. */
+  /**
+   * Every tool carrying this annotation reads; none of them writes.
+   *
+   * All four are stated rather than left to default, because the spec defaults
+   * are the opposite of what these tools are: an unannotated tool counts as
+   * `readOnlyHint: false` AND `destructiveHint: true`, so a cautious client has
+   * to gate it behind a prompt.
+   *
+   * `openWorldHint: false` because an ELO archive is a closed, known domain —
+   * one configured instance — not the open web. It was `true` until now, which
+   * was over-cautious rather than wrong.
+   */
   const readOnly = {
     readOnlyHint: true,
     destructiveHint: false,
     idempotentHint: true,
-    openWorldHint: true,
+    openWorldHint: false,
   } as const;
 
   server.registerTool(
@@ -268,9 +343,10 @@ function createServer(): McpServer {
     },
     async (args, extra) => {
       try {
-        return asTextResult(
-          await withEloClient(extra.authInfo, (c) => eloSearch(c, args, listingOptions)),
+        const result = await withEloClient(extra.authInfo, (c) =>
+          eloSearch(c, args, listingOptions),
         );
+        return respond(result, nextStepsForSearch(result));
       } catch (err) {
         return asError(err);
       }
@@ -290,11 +366,10 @@ function createServer(): McpServer {
     },
     async (args, extra) => {
       try {
-        return asTextResult(
-          await withEloClient(extra.authInfo, (c) =>
-            eloFindProjectFolder(c, args, projectFolderOptions),
-          ),
+        const result = await withEloClient(extra.authInfo, (c) =>
+          eloFindProjectFolder(c, args, projectFolderOptions),
         );
+        return respond(result, nextStepsForProjectFolder(result));
       } catch (err) {
         return asError(err);
       }
@@ -314,9 +389,10 @@ function createServer(): McpServer {
     },
     async (args, extra) => {
       try {
-        return asTextResult(
-          await withEloClient(extra.authInfo, (c) => eloListFolder(c, args, listingOptions)),
+        const result = await withEloClient(extra.authInfo, (c) =>
+          eloListFolder(c, args, listingOptions),
         );
+        return respond(result, nextStepsForListFolder(result));
       } catch (err) {
         return asError(err);
       }
@@ -340,11 +416,10 @@ function createServer(): McpServer {
       },
       async (args, extra) => {
         try {
-          return asTextResult(
-            await withContentSlot(() =>
-              withEloClient(extra.authInfo, (c) => eloGetDocumentContent(c, args, contentOptions)),
-            ),
+          const result = await withContentSlot(() =>
+            withEloClient(extra.authInfo, (c) => eloGetDocumentContent(c, args, contentOptions)),
           );
+          return respond(result, nextStepsForDocumentContent(result));
         } catch (err) {
           return asError(err);
         }
@@ -364,9 +439,10 @@ function createServer(): McpServer {
     },
     async (args, extra) => {
       try {
-        return asTextResult(
-          await withEloClient(extra.authInfo, (c) => eloGetMetadata(c, args, linkOptions)),
+        const result = await withEloClient(extra.authInfo, (c) =>
+          eloGetMetadata(c, args, linkOptions),
         );
+        return respond(result, nextStepsForMetadata(result));
       } catch (err) {
         return asError(err);
       }
@@ -388,13 +464,12 @@ function createServer(): McpServer {
     },
     async (extra) => {
       try {
-        return asTextResult(
-          eloWhoAmI(extra.authInfo, {
-            technicalUser: cfg.ELO_USERNAME,
-            authMode: cfg.MCP_AUTH_MODE,
-            sessionIdleTtlSeconds: cfg.ELO_USER_SESSION_TTL,
-          }),
-        );
+        const result = eloWhoAmI(extra.authInfo, {
+          technicalUser: cfg.ELO_USERNAME,
+          authMode: cfg.MCP_AUTH_MODE,
+          sessionIdleTtlSeconds: cfg.ELO_USER_SESSION_TTL,
+        });
+        return respond(result, nextStepsForWhoAmI(result));
       } catch (err) {
         return asError(err);
       }
@@ -414,7 +489,7 @@ function createServer(): McpServer {
     },
     async (args, extra) => {
       try {
-        return asTextResult(
+        return respond(
           await withEloClient(extra.authInfo, (c) => eloGetDocumentLink(c, args, linkOptions)),
         );
       } catch (err) {
@@ -422,6 +497,231 @@ function createServer(): McpServer {
       }
     },
   );
+
+  // --- Write tools ----------------------------------------------------------
+  //
+  // Not registered at all unless writing is switched on, so a client of a
+  // read-only deployment never sees them — same as elo_get_document_content.
+  if (cfg.ELO_WRITE_ENABLED) {
+    /**
+     * Adds something; nothing existing is replaced, and ELO keeps what was
+     * there before. `destructiveHint: false` is the point of this literal —
+     * without it the spec default (true, once readOnlyHint is false) would put
+     * creating an empty folder in the same category as overwriting data.
+     */
+    const writeAdditive = {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    } as const;
+
+    /** Replaces values that were already there. Honestly destructive. */
+    const writeDestructive = {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: false,
+    } as const;
+
+    const writeOptions = { policy: writePolicy, webclientBaseUrl: cfg.ELO_WEBCLIENT_URL };
+    /** Writes never run as the technical account — the guard has no fallback. */
+    const userClient = (authInfo: AuthInfo | undefined) => requireEloUser(authInfo).client;
+
+    server.registerTool(
+      'elo_create_folder',
+      {
+        title: 'Preview: create a folder',
+        description:
+          'Checks whether a folder could be created and shows exactly what would happen. Writes nothing. Returns a confirmToken; pass it to elo_create_folder_commit to actually create the folder.',
+        inputSchema: CreateFolderInputSchema,
+        annotations: readOnly,
+      },
+      async (args, extra) => {
+        try {
+          const result = await prepareCreateFolder(
+            userClient(extra.authInfo), extra.authInfo, args, writeOptions,
+          );
+          return respond(result, [
+            `elo_create_folder_commit with {"parentId":"${args.parentId}","name":"${args.name}","maskName":"${args.maskName}","confirmToken":"${result.confirmToken}","idempotencyKey":"<a unique id you choose>"} to create it`,
+          ]);
+        } catch (err) {
+          return asError(err);
+        }
+      },
+    );
+
+    server.registerTool(
+      'elo_create_folder_commit',
+      {
+        title: 'Create the previewed folder',
+        description:
+          'Creates the folder previewed by elo_create_folder. Needs that call\'s confirmToken and your own idempotencyKey; repeating a key returns the first result instead of creating a second folder.',
+        inputSchema: { ...CreateFolderInputSchema, ...CommitInputSchema },
+        annotations: writeAdditive,
+      },
+      async (args, extra) => {
+        try {
+          const result = await commitCreateFolder(userClient(extra.authInfo), extra.authInfo, args);
+          return respond(result, [
+            `elo_list_folder with {"folderId":"${result.objId}"} to confirm what is in it`,
+          ]);
+        } catch (err) {
+          return asError(err);
+        }
+      },
+    );
+
+    server.registerTool(
+      'elo_update_metadata',
+      {
+        title: 'Preview: change index fields',
+        description:
+          'Shows the current and the proposed value of every field that would change. Writes nothing. Returns a confirmToken for elo_update_metadata_commit.',
+        inputSchema: UpdateMetadataInputSchema,
+        annotations: readOnly,
+      },
+      async (args, extra) => {
+        try {
+          const result = await prepareUpdateMetadata(
+            userClient(extra.authInfo), extra.authInfo, args, writeOptions,
+          );
+          const real = result.changes.filter((c) => !c.unchanged);
+          return respond(
+            result,
+            real.length === 0
+              ? ['every field already holds the proposed value — there is nothing to change']
+              : [
+                  `elo_update_metadata_commit with {"objId":"${args.objId}","indexFields":${JSON.stringify(args.indexFields)},"confirmToken":"${result.confirmToken}","idempotencyKey":"<a unique id you choose>"} to REPLACE ${real.length} value(s)`,
+                ],
+          );
+        } catch (err) {
+          return asError(err);
+        }
+      },
+    );
+
+    server.registerTool(
+      'elo_update_metadata_commit',
+      {
+        title: 'Replace the previewed index fields',
+        description:
+          'Overwrites the index fields previewed by elo_update_metadata. The previous values are replaced. Needs that call\'s confirmToken and your own idempotencyKey.',
+        inputSchema: { ...UpdateMetadataInputSchema, ...CommitInputSchema },
+        annotations: writeDestructive,
+      },
+      async (args, extra) => {
+        try {
+          const result = await commitUpdateMetadata(userClient(extra.authInfo), extra.authInfo, args);
+          return respond(result, [
+            `elo_get_metadata with {"objId":"${result.objId}"} to read back what is stored now`,
+          ]);
+        } catch (err) {
+          return asError(err);
+        }
+      },
+    );
+
+    const documentOptions = {
+      ...writeOptions,
+      transport: {
+        maxBytes: cfg.ELO_WRITE_MAX_BYTES,
+        timeoutMs: cfg.ELO_DOWNLOAD_TIMEOUT_MS,
+      },
+    };
+
+    server.registerTool(
+      'elo_upload_document',
+      {
+        title: 'Preview: file a new document',
+        description:
+          'Checks a file against the size, type and target rules and shows where it would be filed. Writes nothing. Returns a confirmToken for elo_upload_document_commit.',
+        inputSchema: UploadDocumentInputSchema,
+        annotations: readOnly,
+      },
+      async (args, extra) => {
+        try {
+          const result = await prepareUploadDocument(
+            userClient(extra.authInfo), extra.authInfo, args, documentOptions,
+          );
+          return respond(result, [
+            `elo_upload_document_commit with the same arguments plus {"confirmToken":"${result.confirmToken}","idempotencyKey":"<a unique id you choose>"} to file it`,
+          ]);
+        } catch (err) {
+          return asError(err);
+        }
+      },
+    );
+
+    server.registerTool(
+      'elo_upload_document_commit',
+      {
+        title: 'File the previewed document',
+        description:
+          'Uploads and files the document previewed by elo_upload_document. Needs that call\'s confirmToken and your own idempotencyKey; repeating a key returns the first result instead of filing a second copy.',
+        inputSchema: { ...UploadDocumentInputSchema, ...CommitInputSchema },
+        annotations: writeAdditive,
+      },
+      async (args, extra) => {
+        try {
+          const result = await commitUploadDocument(
+            userClient(extra.authInfo), extra.authInfo, args, documentOptions,
+          );
+          return respond(result, [
+            `elo_get_metadata with {"objId":"${result.objId}"} to see how it was filed`,
+          ]);
+        } catch (err) {
+          return asError(err);
+        }
+      },
+    );
+
+    server.registerTool(
+      'elo_add_document_version',
+      {
+        title: 'Preview: add a document version',
+        description:
+          'Checks a file against the rules and shows which document would get a new version. Writes nothing. Earlier versions are always kept. Returns a confirmToken.',
+        inputSchema: AddVersionInputSchema,
+        annotations: readOnly,
+      },
+      async (args, extra) => {
+        try {
+          const result = await prepareAddVersion(
+            userClient(extra.authInfo), extra.authInfo, args, documentOptions,
+          );
+          return respond(result, [
+            `elo_add_document_version_commit with the same arguments plus {"confirmToken":"${result.confirmToken}","idempotencyKey":"<a unique id you choose>"} to add it`,
+          ]);
+        } catch (err) {
+          return asError(err);
+        }
+      },
+    );
+
+    server.registerTool(
+      'elo_add_document_version_commit',
+      {
+        title: 'Add the previewed document version',
+        description:
+          'Adds the previewed file as a new version. ELO keeps every earlier version, so nothing is lost. Needs the confirmToken and your own idempotencyKey.',
+        inputSchema: { ...AddVersionInputSchema, ...CommitInputSchema },
+        annotations: writeAdditive,
+      },
+      async (args, extra) => {
+        try {
+          const result = await commitAddVersion(
+            userClient(extra.authInfo), extra.authInfo, args, documentOptions,
+          );
+          return respond(result, [
+            `elo_get_metadata with {"objId":"${result.objId}"} to confirm the new version`,
+          ]);
+        } catch (err) {
+          return asError(err);
+        }
+      },
+    );
+  }
 
   return server;
 }
@@ -496,6 +796,15 @@ async function startHttp() {
 
     startStoreSweep();
     startEloSessionSweep();
+
+    if (cfg.ELO_WRITE_ENABLED) {
+      startPreflightSweep();
+      startIdempotencySweep();
+      logger.warn(
+        { roots: parseList(cfg.ELO_WRITE_ROOT_IDS), masks: parseList(cfg.ELO_WRITE_MASKS) },
+        'Write tools are ENABLED — signed-in users may create and change objects in these areas',
+      );
+    }
   }
 
   // One gate for both credentials. McpTokenVerifier accepts the shared secret

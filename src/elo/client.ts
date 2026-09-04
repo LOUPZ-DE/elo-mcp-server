@@ -29,6 +29,13 @@ export interface DownloadOptions {
   timeoutMs: number;
 }
 
+export interface UploadOptions {
+  maxBytes: number;
+  timeoutMs: number;
+  /** Sent as Content-Type; ELO stores it on the version. */
+  contentType: string;
+}
+
 export interface EloClientConfig {
   baseUrl: string;
   username: string;
@@ -200,6 +207,38 @@ export class EloClient {
   }
 
   /**
+   * Like `request()`, but never replays the call.
+   *
+   * `request()` re-logins and repeats the POST once when IX reports an invalid
+   * session. That is right for a read — worst case the same rows come back
+   * twice. It is wrong for anything that creates: the first attempt may well
+   * have reached IX and succeeded, with only the response lost, and the replay
+   * then files a second folder or a second document version.
+   *
+   * A session that expired mid-write is therefore surfaced rather than papered
+   * over. The caller is holding a confirmation token it has already spent, so
+   * the correct outcome is a fresh preview and a fresh confirmation — not a
+   * silent second attempt nobody asked for.
+   *
+   * `ensureSession()` still runs first, so the ordinary case of an eight-minute
+   * session having lapsed *before* the call is handled without any replay at all.
+   */
+  async requestOnce<T>(endpoint: string, body: unknown): Promise<T> {
+    await this.ensureSession();
+    try {
+      const response = await this.http.post<T>(endpoint, this.injectCi(body), {
+        headers: this.authHeaders(),
+      });
+      // IX answers most business errors with HTTP 200 and an `exception` body
+      // (BUGFIXES #1), so the status code alone proves nothing.
+      this.assertNoException(response.data, endpoint);
+      return response.data;
+    } catch (err) {
+      throw this.enrichAxiosError(err, endpoint);
+    }
+  }
+
+  /**
    * Fetch a document's bytes from an IX content URL.
    *
    * Deliberately not routed through `request()`: that method injects `ci`,
@@ -254,6 +293,58 @@ export class EloClient {
       };
     } catch (err) {
       throw this.mapDownloadError(err, url);
+    }
+  }
+
+  /**
+   * Send a document's bytes to an IX upload URL.
+   *
+   * The counterpart to `download()` and pinned the same way: `checkinDocBegin`
+   * hands back a URL that in this deployment points at the *internal* host
+   * (BUGFIXES #10), and `resolveStreamUrl` re-anchors it onto `ELO_BASE_URL`'s
+   * origin. Without that, a URL from the server would decide where three sets
+   * of credentials get sent.
+   *
+   * A method rather than something a tool assembles, because `authHeaders()` is
+   * private on purpose — the Basic pair and the session cookie should not be
+   * reachable from caller code.
+   *
+   * Returns the upload result string, which `checkinDocEnd` needs in
+   * `docs[0].uploadResult` to link the bytes to the version.
+   */
+  async upload(rawUrl: string, bytes: Buffer, opts: UploadOptions): Promise<string> {
+    await this.ensureSession();
+    const url = resolveStreamUrl(this.config.baseUrl, rawUrl);
+
+    try {
+      const response = await this.http.post<unknown>(url, bytes, {
+        timeout: opts.timeoutMs,
+        maxContentLength: opts.maxBytes,
+        maxBodyLength: opts.maxBytes,
+        // Same reasoning as download(): never follow a redirect while carrying
+        // credentials — and on a POST a redirect would also risk re-sending the
+        // whole body to wherever it points.
+        maxRedirects: 0,
+        headers: {
+          ...this.authHeaders(),
+          'Content-Type': opts.contentType,
+          Accept: '*/*',
+        },
+        // The document manager answers with a plain string, not JSON.
+        responseType: 'text',
+        transformResponse: [(data: unknown) => data],
+      });
+
+      const result = typeof response.data === 'string' ? response.data.trim() : '';
+      if (!result) {
+        throw new Error('The ELO document manager accepted the upload but returned no result id.');
+      }
+      // Deliberately no URL and no bytes in the log: the URL is a short-lived
+      // capability and the bytes are the user's document.
+      logger.debug({ bytes: bytes.length }, 'ELO document uploaded');
+      return result;
+    } catch (err) {
+      throw this.enrichAxiosError(err, 'document upload');
     }
   }
 

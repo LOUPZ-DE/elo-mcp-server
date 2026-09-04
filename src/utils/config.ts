@@ -3,6 +3,7 @@ import { isAbsolute } from 'node:path';
 import { z } from 'zod';
 import { logger } from './logger.js';
 import { decodeStateKey, secretsMatch } from './stateFile.js';
+import { parseList } from '../write/policy.js';
 
 const ConfigSchema = z.object({
   ELO_BASE_URL: z.string().url(),
@@ -86,6 +87,24 @@ const ConfigSchema = z.object({
   // (RFC 7591), so without a cap anyone can grow the map without bound.
   OAUTH_MAX_CLIENTS: z.coerce.number().int().positive().default(500),
 
+  // --- Write MVP (off by default) --------------------------------------------
+  // Writing is disabled unless this is true, and a disabled write tool is not
+  // advertised at all — same pattern as ELO_DOCUMENT_CONTENT_ENABLED.
+  // NOTE: not z.coerce.boolean() — that turns the string "false" into true.
+  ELO_WRITE_ENABLED: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
+  // Every allowlist below defaults to empty, and empty means NOTHING is
+  // permitted rather than everything. Comma-separated.
+  ELO_WRITE_ROOT_IDS: z.string().default(''),
+  ELO_WRITE_MASKS: z.string().default(''),
+  ELO_WRITE_FIELDS: z.string().default(''),
+  ELO_WRITE_MIME_TYPES: z.string().default(''),
+  ELO_WRITE_MAX_BYTES: z.coerce.number().int().positive().default(10 * 1024 * 1024),
+  // How long a prepared write stays confirmable, in seconds.
+  ELO_WRITE_PREFLIGHT_TTL: z.coerce.number().int().positive().max(3600).default(300),
+  // Sandbox folder for the live write test. Not read by the server itself —
+  // scripts/test-live-write.ts refuses to run without it.
+  ELO_TEST_FOLDER_ID: z.string().optional(),
+
   // --- Encrypted state persistence ------------------------------------------
   // Absolute path to the state file. Without it the server runs purely in
   // memory and every restart drops the DCR registrations, the refresh tokens
@@ -158,6 +177,35 @@ export function loadConfig(): Config {
         `MCP_AUTH_MODE=${data.MCP_AUTH_MODE} requires: ${missing.join(', ')}.\n` +
           'Generate the secrets with:\n' +
           '  node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64url\'))"',
+      );
+    }
+  }
+
+  if (data.ELO_WRITE_ENABLED) {
+    // Writes are attributable or they do not happen. The shared secret acts as
+    // the technical account, so a deployment that cannot offer a personal
+    // sign-in has no identity to attribute a write to.
+    if (!oauthEnabled) {
+      throw new Error(
+        'ELO_WRITE_ENABLED=true requires MCP_AUTH_MODE=oauth or both — writing is only permitted ' +
+          'for a signed-in ELO user, and the shared secret cannot provide one.',
+      );
+    }
+    // Empty allowlists mean "nothing permitted", which would make every write
+    // fail at run time with a policy error. Better to say so at boot.
+    const emptyLists = (
+      [
+        ['ELO_WRITE_ROOT_IDS', data.ELO_WRITE_ROOT_IDS],
+        ['ELO_WRITE_MASKS', data.ELO_WRITE_MASKS],
+      ] as const
+    )
+      .filter(([, value]) => parseList(value).length === 0)
+      .map(([name]) => name);
+    if (emptyLists.length > 0) {
+      throw new Error(
+        `ELO_WRITE_ENABLED=true requires a non-empty ${emptyLists.join(' and ')}. ` +
+          'An allowlist left blank permits nothing, so every write would be refused. ' +
+          'Name the folder objId(s) writing is confined to, and the mask(s) new objects may use.',
       );
     }
   }
