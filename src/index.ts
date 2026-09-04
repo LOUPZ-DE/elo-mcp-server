@@ -66,6 +66,14 @@ import {
   prepareUpdateMetadata,
   commitUpdateMetadata,
 } from './tools/elo_write_metadata.js';
+import {
+  UploadDocumentInputSchema,
+  AddVersionInputSchema,
+  prepareUploadDocument,
+  commitUploadDocument,
+  prepareAddVersion,
+  commitAddVersion,
+} from './tools/elo_write_document.js';
 
 let cfg: ReturnType<typeof loadConfig>;
 try {
@@ -584,6 +592,106 @@ function createServer(): McpServer {
           const result = await commitUpdateMetadata(userClient(extra.authInfo), extra.authInfo, args);
           return respond(result, [
             `elo_get_metadata with {"objId":"${result.objId}"} to read back what is stored now`,
+          ]);
+        } catch (err) {
+          return asError(err);
+        }
+      },
+    );
+
+    const documentOptions = {
+      ...writeOptions,
+      transport: {
+        maxBytes: cfg.ELO_WRITE_MAX_BYTES,
+        timeoutMs: cfg.ELO_DOWNLOAD_TIMEOUT_MS,
+      },
+    };
+
+    server.registerTool(
+      'elo_upload_document',
+      {
+        title: 'Preview: file a new document',
+        description:
+          'Checks a file against the size, type and target rules and shows where it would be filed. Writes nothing. Returns a confirmToken for elo_upload_document_commit.',
+        inputSchema: UploadDocumentInputSchema,
+        annotations: readOnly,
+      },
+      async (args, extra) => {
+        try {
+          const result = await prepareUploadDocument(
+            userClient(extra.authInfo), extra.authInfo, args, documentOptions,
+          );
+          return respond(result, [
+            `elo_upload_document_commit with the same arguments plus {"confirmToken":"${result.confirmToken}","idempotencyKey":"<a unique id you choose>"} to file it`,
+          ]);
+        } catch (err) {
+          return asError(err);
+        }
+      },
+    );
+
+    server.registerTool(
+      'elo_upload_document_commit',
+      {
+        title: 'File the previewed document',
+        description:
+          'Uploads and files the document previewed by elo_upload_document. Needs that call\'s confirmToken and your own idempotencyKey; repeating a key returns the first result instead of filing a second copy.',
+        inputSchema: { ...UploadDocumentInputSchema, ...CommitInputSchema },
+        annotations: writeAdditive,
+      },
+      async (args, extra) => {
+        try {
+          const result = await commitUploadDocument(
+            userClient(extra.authInfo), extra.authInfo, args, documentOptions,
+          );
+          return respond(result, [
+            `elo_get_metadata with {"objId":"${result.objId}"} to see how it was filed`,
+          ]);
+        } catch (err) {
+          return asError(err);
+        }
+      },
+    );
+
+    server.registerTool(
+      'elo_add_document_version',
+      {
+        title: 'Preview: add a document version',
+        description:
+          'Checks a file against the rules and shows which document would get a new version. Writes nothing. Earlier versions are always kept. Returns a confirmToken.',
+        inputSchema: AddVersionInputSchema,
+        annotations: readOnly,
+      },
+      async (args, extra) => {
+        try {
+          const result = await prepareAddVersion(
+            userClient(extra.authInfo), extra.authInfo, args, documentOptions,
+          );
+          return respond(result, [
+            `elo_add_document_version_commit with the same arguments plus {"confirmToken":"${result.confirmToken}","idempotencyKey":"<a unique id you choose>"} to add it`,
+          ]);
+        } catch (err) {
+          return asError(err);
+        }
+      },
+    );
+
+    server.registerTool(
+      'elo_add_document_version_commit',
+      {
+        title: 'Add the previewed document version',
+        description:
+          'Adds the previewed file as a new version. ELO keeps every earlier version, so nothing is lost. Needs the confirmToken and your own idempotencyKey.',
+        inputSchema: { ...AddVersionInputSchema, ...CommitInputSchema },
+        annotations: writeAdditive,
+      },
+      async (args, extra) => {
+        try {
+          const result = await commitAddVersion(
+            userClient(extra.authInfo), extra.authInfo, args, documentOptions,
+          );
+          return respond(result, [
+            `elo_get_metadata with {"objId":"${result.objId}"} to confirm the new version`,
           ]);
         } catch (err) {
           return asError(err);

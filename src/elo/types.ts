@@ -80,6 +80,15 @@ export interface EloDocVersion {
 
 export interface EloDocument {
   docs?: EloDocVersion[];
+  /**
+   * Present on the checkin path — `checkinDocEnd` answers with the objId of the
+   * stored object, which is the only place a brand-new document's id appears.
+   * Absent on the read path, where `checkoutDoc` already knows what was asked
+   * for. Both per the live OpenAPI document (Indexserver 23.0.0.0).
+   */
+  objId?: string;
+  /** Attachments. Declared for completeness; the write MVP does not use them. */
+  atts?: EloDocVersion[];
 }
 
 export interface EloEditInfo {
@@ -146,3 +155,11 @@ export type CheckoutUserResponse = EloResponse<EloUserInfo>;
  */
 export type CreateSordResponse = EloResponse<EloEditInfo>;
 export type CheckinSordResponse = EloResponse<number>;
+
+/**
+ * `checkinDocBegin` returns a Document whose `docs[0].url` is where the bytes
+ * go; the string that upload answers with belongs in `docs[0].uploadResult`
+ * before `checkinDocEnd` is called. Both signatures read from the live
+ * OpenAPI document (Indexserver 23.0.0.0).
+ */
+export type CheckinDocResponse = EloResponse<EloDocument>;
