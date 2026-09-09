@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Uploads may be as large as the read tools allow.** `ELO_WRITE_MAX_BYTES`
+  left unset now follows `ELO_MAX_DOCUMENT_BYTES` (15 MiB by default) instead
+  of its own 10 MiB: a document the server will read out of the archive is one
+  it should be willing to put in.
+
+  Neither figure was reachable before. A file travels base64-encoded inside the
+  JSON arguments — four bytes for every three — and `express.json` was fixed at
+  1 MiB for every route, so anything over roughly 750 KB was rejected by the
+  parser before a single write check ran. The `/mcp` body limit is now derived
+  from `ELO_WRITE_MAX_BYTES`; every other route keeps the flat 1 MiB, and the
+  large limit is mounted behind the bearer check so an unauthenticated caller
+  still cannot push a large body at the process.
 - **Uploads accept every file type the read tools can open** — PDF, DOCX,
   XLSX/XLSM, EML, MSG and the text formats — via `ELO_WRITE_MIME_TYPES=readable`.
   Explicit MIME types still work, alone or mixed with the keyword; an empty
@@ -109,6 +121,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cannot make.
 
 ### Fixed
+- **A request body over the limit reported itself as a server error.** The
+  Express error handler ignored the status the body parser had already set, so
+  an oversized upload came back as 500 `server_error` with the reason visible
+  only in our log — the caller’s mistake dressed up as ours. Oversized bodies
+  now give 413 `payload_too_large` naming the byte limit, and malformed JSON
+  gives 400 rather than 500.
+
 - **A client asking to authenticate with a secret could not register at all.**
   `/register` refused anything but `token_endpoint_auth_method: "none"` with a
   400. RFC 7591 §3.2.1 is explicit that the server may return metadata differing

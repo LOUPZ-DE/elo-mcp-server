@@ -98,7 +98,10 @@ const ConfigSchema = z.object({
   ELO_WRITE_MASKS: z.string().default(''),
   ELO_WRITE_FIELDS: z.string().default(''),
   ELO_WRITE_MIME_TYPES: z.string().default(''),
-  ELO_WRITE_MAX_BYTES: z.coerce.number().int().positive().default(10 * 1024 * 1024),
+  // Left undefined it follows ELO_MAX_DOCUMENT_BYTES: a document the server is
+  // willing to read out of the archive is one it should be willing to put in,
+  // and two independent numbers drift apart the moment one of them is tuned.
+  ELO_WRITE_MAX_BYTES: z.coerce.number().int().positive().optional(),
   // How long a prepared write stays confirmable, in seconds.
   ELO_WRITE_PREFLIGHT_TTL: z.coerce.number().int().positive().max(3600).default(300),
   // Sandbox folder for the live write test. Not read by the server itself —
@@ -124,7 +127,9 @@ const ConfigSchema = z.object({
   ELO_MAX_USER_SESSIONS: z.coerce.number().int().positive().max(500).default(50),
 });
 
-export type Config = z.infer<typeof ConfigSchema> & {
+export type Config = Omit<z.infer<typeof ConfigSchema>, 'ELO_WRITE_MAX_BYTES'> & {
+  /** Resolved, never undefined: it falls back to ELO_MAX_DOCUMENT_BYTES. */
+  ELO_WRITE_MAX_BYTES: number;
   /** True when the built-in OAuth authorization server is mounted. */
   oauthEnabled: boolean;
   /** True when MCP_SHARED_SECRET is still accepted on /mcp. */
@@ -250,6 +255,7 @@ export function loadConfig(): Config {
   return {
     ...data,
     PUBLIC_BASE_URL: base || undefined,
+    ELO_WRITE_MAX_BYTES: data.ELO_WRITE_MAX_BYTES ?? data.ELO_MAX_DOCUMENT_BYTES,
     oauthEnabled,
     sharedSecretEnabled,
     MCP_RESOURCE: oauthEnabled ? `${base}/mcp` : '',

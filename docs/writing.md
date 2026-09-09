@@ -70,7 +70,7 @@ anything.
 | index fields | `assertFieldsAllowed` | reports every rejected field at once, so one round trip is enough |
 | MIME type | `assertFileAllowed` | case-insensitive; `readable` expands to every type the read tools open |
 | file name | `assertFileAllowed` | must have an extension, and it must match the declared MIME type |
-| size | `assertFileAllowed` | measured after base64 decoding |
+| size | `assertFileAllowed` | measured after base64 decoding; defaults to the read limit, `ELO_MAX_DOCUMENT_BYTES` |
 | ELO permissions | ELO itself | the write runs on the user's own IX session, so their rights apply unchanged |
 
 Base64 input is decoded, re-encoded and compared. `Buffer.from(x, 'base64')`
@@ -104,6 +104,24 @@ What is **not** offered for upload is what the read side lists as known but
 unreadable: legacy `.doc`/`.xls`/`.ppt`, `.pptx`, archives, CAD and IFC, and
 EloCrypt `.ecf`. Filing a document the archive cannot search or preview is a
 decision for the archive owner, not a default.
+
+## How large a file may be
+
+`ELO_WRITE_MAX_BYTES`, and left unset it follows `ELO_MAX_DOCUMENT_BYTES` —
+15 MiB by default. A document the server will read out of the archive is one
+it should be willing to put in, and two independent numbers drift apart the
+moment one of them is tuned.
+
+A file reaches an MCP tool base64-encoded inside the JSON arguments, so the
+request body must hold four bytes for every three of the file. The `/mcp` body
+limit is therefore derived from `ELO_WRITE_MAX_BYTES` rather than fixed; every
+other route keeps a flat 1 MiB, and the large limit is mounted behind the
+bearer check so an unauthenticated caller cannot push a large body at the
+process at all.
+
+Over the limit gives **413 `payload_too_large`**, naming the byte figure. It
+used to give 500 `server_error`, with the reason visible only in the server
+log — a file that was merely too big looked like a broken server.
 
 ## Concurrency
 

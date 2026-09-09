@@ -738,7 +738,22 @@ async function startHttp() {
   // in X-Forwarded-*. Without this the rate limiter would see one IP for
   // everyone and cookies would not be marked Secure.
   app.set('trust proxy', 1);
-  app.use(express.json({ limit: '1mb' }));
+  // Two JSON parsers, because /mcp is the only route that ever carries a file.
+  //
+  // An upload arrives base64-encoded inside the tool arguments, so the body has
+  // to hold four bytes for every three of the file, plus the JSON-RPC envelope
+  // and the other arguments. A flat 1 MiB made ELO_WRITE_MAX_BYTES unreachable:
+  // anything over roughly 750 KB was rejected by the parser before a single
+  // write check ran.
+  //
+  // The larger limit is mounted on /mcp *behind* the bearer check, so an
+  // unauthenticated caller still cannot push more than 1 MiB at this process.
+  const mcpBodyLimit = cfg.ELO_WRITE_ENABLED
+    ? Math.ceil(cfg.ELO_WRITE_MAX_BYTES / 3) * 4 + 64 * 1024
+    : 1024 * 1024;
+  const mcpJson = express.json({ limit: mcpBodyLimit });
+  const smallJson = express.json({ limit: '1mb' });
+  app.use((req, res, next) => (req.path === '/mcp' ? next() : smallJson(req, res, next)));
   // Form posts only reach /authorize and /token; everything else is JSON.
   const formParser = express.urlencoded({ extended: false, limit: '64kb' });
 
@@ -821,7 +836,7 @@ async function startHttp() {
 
   let reqCounter = 0;
 
-  app.all('/mcp', corsMiddleware, bearerAuth, async (req, res) => {
+  app.all('/mcp', corsMiddleware, bearerAuth, mcpJson, async (req, res) => {
     // Stateless: a fresh transport per request. Simpler model and fine for
     // automation clients (n8n/Make/Notion-agents/claude.ai) where each call
     // is an independent JSON-RPC exchange.
@@ -891,6 +906,29 @@ async function startHttp() {
   // leaving the response hanging. Without this Express 4 would answer with its
   // default HTML error page, which an OAuth client cannot parse.
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+    // The body parser rejects oversized and malformed bodies with a 4xx, and
+    // reporting the caller's mistake as 500 makes it look like ours: an upload
+    // over the limit surfaced as `server_error` with the real reason visible
+    // only in our log. Pass those two through with something actionable.
+    const type = (err as { type?: string }).type;
+    if (type === 'entity.too.large') {
+      logger.warn({ limit: (err as { limit?: number }).limit }, 'Request body over the limit');
+      if (!res.headersSent) {
+        res.status(413).json({
+          error: 'payload_too_large',
+          error_description:
+            `The request body exceeds ${mcpBodyLimit.toLocaleString('en-US')} bytes. ` +
+            'A file is base64-encoded in transit, so it needs about a third more room than its own size.',
+        });
+      }
+      return;
+    }
+    if (type === 'entity.parse.failed') {
+      logger.warn('Request body was not valid JSON');
+      if (!res.headersSent) res.status(400).json({ error: 'invalid_request' });
+      return;
+    }
+
     logger.error({ err }, 'Unhandled error in HTTP handler');
     if (!res.headersSent) {
       res.status(500).json({ error: 'server_error' });

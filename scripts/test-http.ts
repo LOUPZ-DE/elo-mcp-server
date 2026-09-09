@@ -232,6 +232,26 @@ async function main(): Promise<void> {
     (r) => r.status === 401,
   );
 
+  // A body over the limit is the caller's mistake, and it used to be reported
+  // as 500 server_error with the real reason only in our log — which made an
+  // upload that was merely too large look like a broken server.
+  await check(
+    'POST /mcp with an oversized body → 413, named as such',
+    () =>
+      fetch(`${BASE}/mcp`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${SECRET}`,
+          'Content-Type': 'application/json',
+          Accept: 'application/json, text/event-stream',
+        },
+        // Writing is off in this run, so the limit is the 1 MiB default.
+        body: `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"pad":"${'A'.repeat(1_200_000)}"}}`,
+      }),
+    (r, body) =>
+      (r.status === 413 && body.includes('payload_too_large')) || `status ${r.status}`,
+  );
+
   await check(
     'POST /mcp initialize → 200',
     () =>
