@@ -22,6 +22,7 @@ import {
   type UploadTransport,
 } from '../write/operations.js';
 import { WritePolicyError } from '../write/errors.js';
+import { extensionOf } from '../extract/formats.js';
 import type { WriteToolOptions } from './elo_write_folder.js';
 
 /**
@@ -81,10 +82,15 @@ function decodeContent(contentBase64: string): Buffer {
   return bytes;
 }
 
-/** Extension without the dot; ELO stores it separately from the MIME type. */
-function extensionOf(fileName: string): string {
-  const dot = fileName.lastIndexOf('.');
-  return dot > 0 ? fileName.slice(dot + 1).toLowerCase() : '';
+/**
+ * The extension as ELO should store it.
+ *
+ * Lower-case, which is what the live instance accepted when this was proved
+ * end to end; the shared registry works in upper case because that is how IX
+ * hands `docs[0].ext` back.
+ */
+function storedExtension(fileName: string): string {
+  return extensionOf(fileName).toLowerCase();
 }
 
 export async function prepareUploadDocument(
@@ -100,7 +106,7 @@ export async function prepareUploadDocument(
   assertIsFolder(parent);
   assertTargetAllowed(parent, opts.policy);
   assertMaskAllowed(args.maskName, opts.policy);
-  assertFileAllowed(args.contentType, bytes.length, opts.policy);
+  assertFileAllowed(args.contentType, args.fileName, bytes.length, opts.policy);
   if (args.indexFields) assertFieldsAllowed(args.indexFields, opts.policy);
 
   const { token, expiresAt } = prepareWrite({
@@ -167,7 +173,7 @@ export async function commitUploadDocument(
             bytes: decodeContent(payload.contentBase64),
             fileName: payload.fileName,
             contentType: payload.contentType,
-            ext: extensionOf(payload.fileName),
+            ext: storedExtension(payload.fileName),
             versionComment: payload.versionComment,
           },
           opts.transport,
@@ -189,7 +195,7 @@ export async function prepareAddVersion(
   const snapshot = await readSnapshot(client, args.objId);
   const target = snapshot.sord;
   assertTargetAllowed(target, opts.policy);
-  assertFileAllowed(args.contentType, bytes.length, opts.policy);
+  assertFileAllowed(args.contentType, args.fileName, bytes.length, opts.policy);
 
   const { token, expiresAt } = prepareWrite({
     operation: 'add_document_version',
@@ -249,7 +255,7 @@ export async function commitAddVersion(
             bytes: decodeContent(payload.contentBase64),
             fileName: payload.fileName,
             contentType: payload.contentType,
-            ext: extensionOf(payload.fileName),
+            ext: storedExtension(payload.fileName),
             versionComment: payload.versionComment,
           },
           opts.transport,

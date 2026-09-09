@@ -1,45 +1,26 @@
 ﻿import { extractPlain } from './plain.js';
+import { READABLE_FORMATS, type ReadableKind } from './formats.js';
 import type { ExtractInput, ExtractResult } from './types.js';
 
 export { EncryptedDocumentError, ExtractionFailedError } from './types.js';
 export type { ExtractResult, ExtractInput } from './types.js';
 
-type Kind = 'pdf' | 'docx' | 'xlsx' | 'eml' | 'msg' | 'plain' | 'unsupported';
+type Kind = ReadableKind | 'unsupported';
 
-const MIME_KINDS: Record<string, Kind> = {
-  'application/pdf': 'pdf',
-  'application/x-pdf': 'pdf',
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
-  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
-  'application/vnd.ms-excel.sheet.macroenabled.12': 'xlsx',
-  'message/rfc822': 'eml',
-  'application/vnd.ms-outlook': 'msg',
-  'application/x-msg': 'msg',
-  'text/plain': 'plain',
-  'text/markdown': 'plain',
-  'text/csv': 'plain',
-  'text/html': 'plain',
-  'application/json': 'plain',
-  'application/xml': 'plain',
-  'text/xml': 'plain',
-};
+/**
+ * Dispatch tables, derived rather than written out.
+ *
+ * The same registry answers "may this be uploaded?" on the write side, so a
+ * format cannot be readable here and unknown there — which is what a second,
+ * hand-maintained list produces sooner or later.
+ */
+const MIME_KINDS: Record<string, Kind> = Object.fromEntries(
+  READABLE_FORMATS.flatMap((f) => f.mimeTypes.map((m) => [m, f.kind])),
+);
 
-const EXT_KINDS: Record<string, Kind> = {
-  PDF: 'pdf',
-  DOCX: 'docx',
-  XLSX: 'xlsx',
-  XLSM: 'xlsx',
-  EML: 'eml',
-  MSG: 'msg',
-  TXT: 'plain',
-  MD: 'plain',
-  CSV: 'plain',
-  LOG: 'plain',
-  JSON: 'plain',
-  XML: 'plain',
-  HTML: 'plain',
-  HTM: 'plain',
-};
+const EXT_KINDS: Record<string, Kind> = Object.fromEntries(
+  READABLE_FORMATS.flatMap((f) => f.extensions.map((e) => [e, f.kind])),
+);
 
 /**
  * Formats we recognise but cannot read, with an explanation worth showing.

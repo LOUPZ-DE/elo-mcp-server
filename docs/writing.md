@@ -68,13 +68,42 @@ anything.
 | target folder | `assertTargetAllowed` | against the sord **fetched from ELO**, via `isInsideFolder` — never against a path a caller supplied |
 | mask | `assertMaskAllowed` | exact name match |
 | index fields | `assertFieldsAllowed` | reports every rejected field at once, so one round trip is enough |
-| MIME type | `assertFileAllowed` | case-insensitive |
+| MIME type | `assertFileAllowed` | case-insensitive; `readable` expands to every type the read tools open |
+| file name | `assertFileAllowed` | must have an extension, and it must match the declared MIME type |
 | size | `assertFileAllowed` | measured after base64 decoding |
 | ELO permissions | ELO itself | the write runs on the user's own IX session, so their rights apply unchanged |
 
 Base64 input is decoded, re-encoded and compared. `Buffer.from(x, 'base64')`
 never throws — it silently drops anything that is not base64 — so without that
 comparison a corrupted argument would arrive as a short, plausible-looking file.
+
+## File types
+
+`ELO_WRITE_MIME_TYPES=readable` permits exactly what the read tools can open:
+PDF, DOCX, XLSX/XLSM, EML, MSG, and the text formats (TXT, MD, CSV, LOG, JSON,
+XML, HTML). Both sides read `src/extract/formats.ts`, so the upload allowlist
+and the extractor cannot drift apart — a second hand-maintained list would let
+a type become uploadable that no read tool can then open, and the failure is
+silent.
+
+Explicit MIME types still work, on their own or alongside the keyword
+(`readable,image/png`). An empty value permits nothing.
+
+Two things are checked besides the type itself. The file must have an
+extension, because ELO stores it separately from the MIME type and the read
+tools give it the final say — IX hands out `application/octet-stream` often
+enough that they have to. And the extension must match the declared type.
+
+That second check is what keeps the allowlist meaningful: both fields come
+from the caller, so without it a file named `.exe` uploads cleanly by
+declaring `application/pdf`. A MIME type the registry does not know is left
+alone — an admin who allowlisted `image/png` meant it, and there is nothing to
+cross-check against.
+
+What is **not** offered for upload is what the read side lists as known but
+unreadable: legacy `.doc`/`.xls`/`.ppt`, `.pptx`, archives, CAD and IFC, and
+EloCrypt `.ecf`. Filing a document the archive cannot search or preview is a
+decision for the archive owner, not a default.
 
 ## Concurrency
 

@@ -8,6 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Uploads accept every file type the read tools can open** — PDF, DOCX,
+  XLSX/XLSM, EML, MSG and the text formats — via `ELO_WRITE_MIME_TYPES=readable`.
+  Explicit MIME types still work, alone or mixed with the keyword; an empty
+  value still permits nothing, so no existing deployment changes behaviour.
+
+  The keyword expands from `src/extract/formats.ts`, which the extractor now
+  dispatches on as well. Two lists that have to agree only as long as someone
+  remembers to edit both is the kind of drift that shows up as a file uploaded
+  successfully and then unreadable by our own tools.
+
+  Uploads are now also checked on the file NAME: it must carry an extension,
+  and the extension must match the declared content type. ELO stores the
+  extension separately and the read side gives it the final say (IX hands out
+  `application/octet-stream` often enough that it has to), and both fields come
+  from the caller — so without the cross-check a `.exe` uploads cleanly by
+  declaring `application/pdf`. A MIME type the registry does not know is left
+  to the admin who allowlisted it.
 - **A write MVP, off by default.** Four operations — create a folder, file a
   document, check in a new version, change allowlisted index fields — behind
   `ELO_WRITE_ENABLED` (default `false`). With it off the eight tools are not

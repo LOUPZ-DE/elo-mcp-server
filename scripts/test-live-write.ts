@@ -153,6 +153,34 @@ async function main(): Promise<void> {
     fingerprint(afterVersion) !== beforeVersion || 'the fingerprint did not change',
   );
 
+  // 3b. A type other than PDF. ELO enforces things about documents that only
+  // surface on a real checkin — the mask/document split did — so the second
+  // format the allowlist now permits gets proved rather than assumed.
+  const DOCX_MIME =
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+  const docx = await uploadDocument(
+    client,
+    {
+      parentId: folder.objId,
+      name: `Protokoll ${run}`,
+      maskName: DOCUMENT_MASK,
+      bytes: Buffer.from(`PK MCP live write test ${run}`),
+      fileName: `protokoll-${run}.docx`,
+      contentType: DOCX_MIME,
+      ext: 'docx',
+      versionComment: 'MCP live write test — docx',
+    },
+    transport,
+  );
+  check('a non-PDF type is filed too', /^\d+$/.test(docx.objId) || `objId ${docx.objId}`);
+  await assertInSandbox(docx.objId, 'the new Word document');
+  const docxBack = await readSnapshot(client, docx.objId);
+  check(
+    'ELO stores the extension it was given, which is what the read tools key on',
+    String(docxBack.version?.ext ?? '').toUpperCase() === 'DOCX' ||
+      `ext is "${String(docxBack.version?.ext)}"`,
+  );
+
   // 4. Metadata
   const fieldName = process.env.ELO_TEST_FIELD;
   if (!fieldName) {

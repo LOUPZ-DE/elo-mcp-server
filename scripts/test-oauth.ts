@@ -365,7 +365,7 @@ async function startServer(encryptionKey = STATE_KEY): Promise<ChildProcess> {
       ELO_WRITE_ROOT_IDS: SANDBOX_ID,
       ELO_WRITE_MASKS: 'Ordner',
       ELO_WRITE_FIELDS: 'PRJ_NO,PRJ_NAME',
-      ELO_WRITE_MIME_TYPES: 'application/pdf',
+      ELO_WRITE_MIME_TYPES: 'readable',
       STATE_FILE,
       STATE_ENCRYPTION_KEY: encryptionKey,
       ELO_BASE_URL: `http://127.0.0.1:${IX_PORT}`,
@@ -908,6 +908,54 @@ async function main(): Promise<void> {
       'a second version lands on the same object, not a new one',
       (!versionBody.includes('"isError":true') && versionBody.includes(String(uploadedObjId))) ||
         `body ${versionBody.slice(0, 250)}`,
+    );
+
+    // A type the read tools understand, filed end to end. PDF was the only one
+    // proved before; if the allowlist and the extractor ever drift apart, this
+    // is where it shows.
+    const docx = Buffer.from('PK pretend docx').toString('base64');
+    const DOCX_MIME =
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+    const docxPrep = await rpc(tokens.access_token, 'tools/call', {
+      name: 'elo_upload_document',
+      arguments: {
+        parentId: SANDBOX_ID, name: 'Protokoll', maskName: 'Ordner',
+        fileName: 'protokoll.docx', contentType: DOCX_MIME, contentBase64: docx,
+      },
+    });
+    const docxToken = (await docxPrep.text()).match(/\\"confirmToken\\":\s*\\"([^\\"]+)\\"/)?.[1];
+    const docxUploads = ixUploads.length;
+    const docxCommit = await rpc(tokens.access_token, 'tools/call', {
+      name: 'elo_upload_document_commit',
+      arguments: {
+        parentId: SANDBOX_ID, name: 'Protokoll', maskName: 'Ordner',
+        fileName: 'protokoll.docx', contentType: DOCX_MIME, contentBase64: docx,
+        confirmToken: docxToken, idempotencyKey: 'upload-docx',
+      },
+    });
+    const docxBody = await docxCommit.text();
+    check(
+      'a Word document is filed, not just a PDF',
+      (!docxBody.includes('"isError":true') && ixUploads.length === docxUploads + 1) ||
+        `uploads ${ixUploads.length - docxUploads}, body ${docxBody.slice(0, 250)}`,
+    );
+
+    // The allowlist checks the declared MIME type, and both fields come from
+    // the caller — so the name has to back the claim up.
+    const mismatch = await rpc(tokens.access_token, 'tools/call', {
+      name: 'elo_upload_document',
+      arguments: {
+        parentId: SANDBOX_ID, name: 'Getarnt', maskName: 'Ordner',
+        fileName: 'schadcode.exe', contentType: 'application/pdf', contentBase64: pdf,
+      },
+    });
+    const mismatchBody = await mismatch.text();
+    check(
+      'a file name that contradicts the content type is refused, with no token issued',
+      (mismatchBody.includes('"isError":true') &&
+        /disagree/i.test(mismatchBody) &&
+        !mismatchBody.includes('confirmToken')) ||
+        `body ${mismatchBody.slice(0, 250)}`,
     );
 
     // A concurrent change between preview and confirmation must abort the

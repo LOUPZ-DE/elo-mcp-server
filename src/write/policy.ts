@@ -1,4 +1,11 @@
 import { isInsideFolder } from '../elo/sord.js';
+import {
+  READABLE_MIME_TYPES,
+  extensionOf,
+  formatForExtension,
+  formatForMimeType,
+  normaliseMimeType,
+} from '../extract/formats.js';
 import type { EloSord } from '../elo/types.js';
 import { WritePolicyError } from './errors.js';
 
@@ -28,6 +35,23 @@ export function parseList(raw: string | undefined): string[] {
     .split(',')
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
+}
+
+/**
+ * The upload allowlist, with one shorthand: `readable` stands for every type
+ * the read tools can open.
+ *
+ * Spelling out fifteen MIME strings in an environment variable invites two
+ * kinds of mistake — a typo that silently permits nothing, and a list that
+ * stops matching what the extractor supports. Both are quiet. The token stays
+ * opt-in, and an empty value still permits nothing.
+ */
+export function parseMimeTypes(raw: string | undefined): string[] {
+  const entries = parseList(raw).map((e) => e.toLowerCase());
+  const expanded = entries.flatMap((e) =>
+    e === 'readable' ? [...READABLE_MIME_TYPES] : [normaliseMimeType(e)],
+  );
+  return [...new Set(expanded.filter((m) => m.length > 0))];
 }
 
 /**
@@ -90,12 +114,28 @@ export function assertFieldsAllowed(
   }
 }
 
+/**
+ * May this file be uploaded?
+ *
+ * Three questions, not one. The MIME type must be allowlisted; the file must
+ * have an extension, because ELO stores it separately from the MIME type and
+ * the read tools give it the final say (IX hands out
+ * `application/octet-stream` often enough that they have to); and the two must
+ * agree.
+ *
+ * That last check is what keeps the allowlist meaningful. Both fields come from
+ * the caller, so without it a file named `.exe` uploads cleanly by declaring
+ * `application/pdf` — and lands as a document our own read tools then refuse to
+ * open. A MIME type the registry does not know is left alone: an admin who
+ * allowlisted `image/png` meant it, and there is nothing to cross-check against.
+ */
 export function assertFileAllowed(
   contentType: string | undefined,
+  fileName: string | undefined,
   byteLength: number,
   policy: WritePolicy,
 ): void {
-  const mime = (contentType ?? '').split(';')[0]!.trim().toLowerCase();
+  const mime = normaliseMimeType(contentType);
   if (!mime) {
     throw new WritePolicyError('No content type was given, so the file type cannot be checked.');
   }
@@ -104,6 +144,24 @@ export function assertFileAllowed(
       `Files of type "${mime}" may not be uploaded. Allowed: ${policy.mimeTypes.join(', ') || '(none)'}.`,
     );
   }
+
+  const ext = extensionOf(fileName);
+  if (!ext) {
+    throw new WritePolicyError(
+      `"${fileName ?? ''}" has no file extension. ELO stores the extension separately, and ` +
+        'the document would be filed as a type nothing can open.',
+    );
+  }
+  const declared = formatForMimeType(mime);
+  if (declared && !declared.extensions.includes(ext)) {
+    const actual = formatForExtension(ext);
+    throw new WritePolicyError(
+      `The content type "${mime}" and the file name ".${ext.toLowerCase()}" disagree. ` +
+        `Files of type "${mime}" are named ${declared.extensions.map((e) => `.${e.toLowerCase()}`).join(' or ')}` +
+        (actual ? `, and .${ext.toLowerCase()} means ${actual.mimeTypes[0]}.` : '.'),
+    );
+  }
+
   if (byteLength <= 0) {
     throw new WritePolicyError('The file is empty.');
   }

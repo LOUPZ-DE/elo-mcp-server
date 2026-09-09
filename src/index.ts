@@ -52,7 +52,7 @@ import {
   nextStepsForWhoAmI,
 } from './mcp/nextSteps.js';
 import { requireEloUser } from './write/guard.js';
-import { parseList, type WritePolicy } from './write/policy.js';
+import { parseList, parseMimeTypes, type WritePolicy } from './write/policy.js';
 import { startPreflightSweep } from './write/preflight.js';
 import { startIdempotencySweep } from './write/idempotency.js';
 import {
@@ -188,7 +188,7 @@ const writePolicy: WritePolicy = {
   rootIds: parseList(cfg.ELO_WRITE_ROOT_IDS),
   masks: parseList(cfg.ELO_WRITE_MASKS),
   fields: parseList(cfg.ELO_WRITE_FIELDS),
-  mimeTypes: parseList(cfg.ELO_WRITE_MIME_TYPES).map((m) => m.toLowerCase()),
+  mimeTypes: parseMimeTypes(cfg.ELO_WRITE_MIME_TYPES),
   maxBytes: cfg.ELO_WRITE_MAX_BYTES,
 };
 

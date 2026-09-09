@@ -50,7 +50,9 @@ import {
   assertMaskAllowed,
   assertFieldsAllowed,
   assertFileAllowed,
+  parseMimeTypes,
 } from '../src/write/policy.js';
+import { READABLE_FORMATS, READABLE_MIME_TYPES } from '../src/extract/formats.js';
 import { onceOnly, resetIdempotency } from '../src/write/idempotency.js';
 import { resolveIconPath } from '../src/utils/icon.js';
 import { join } from 'node:path';
@@ -1536,10 +1538,73 @@ test('masks and fields are allowlisted, and rejections are reported together', (
 });
 
 test('uploads are checked on type and size', () => {
-  assert.doesNotThrow(() => assertFileAllowed('application/pdf; charset=binary', 500, policy));
-  assert.throws(() => assertFileAllowed('image/png', 500, policy), /may not be uploaded/i);
-  assert.throws(() => assertFileAllowed('application/pdf', 5000, policy), /the limit is/i);
-  assert.throws(() => assertFileAllowed('application/pdf', 0, policy), /empty/i);
+  const pdf = 'bericht.pdf';
+  assert.doesNotThrow(() => assertFileAllowed('application/pdf; charset=binary', pdf, 500, policy));
+  assert.throws(() => assertFileAllowed('image/png', 'bild.png', 500, policy), /may not be uploaded/i);
+  assert.throws(() => assertFileAllowed('application/pdf', pdf, 5000, policy), /the limit is/i);
+  assert.throws(() => assertFileAllowed('application/pdf', pdf, 0, policy), /empty/i);
+});
+
+section('Write — file types');
+
+const readablePolicy = { ...policy, mimeTypes: parseMimeTypes('readable'), maxBytes: 10_000 };
+
+test('the readable token opens exactly what the read tools can open', () => {
+  // The point of the token: one registry, so a type cannot be readable and
+  // un-uploadable at the same time.
+  assert.deepEqual([...readablePolicy.mimeTypes].sort(), [...READABLE_MIME_TYPES].sort());
+  assert.ok(readablePolicy.mimeTypes.includes('application/pdf'));
+  assert.ok(readablePolicy.mimeTypes.includes('message/rfc822'));
+});
+
+test('every readable format can actually be uploaded', () => {
+  for (const format of READABLE_FORMATS) {
+    for (const mime of format.mimeTypes) {
+      for (const ext of format.extensions) {
+        assert.doesNotThrow(
+          () => assertFileAllowed(mime, `datei.${ext.toLowerCase()}`, 100, readablePolicy),
+          `${mime} as .${ext}`,
+        );
+      }
+    }
+  }
+});
+
+test('the token can be mixed with explicit types, and blanks stay harmless', () => {
+  const mixed = parseMimeTypes('readable, image/png ,');
+  assert.ok(mixed.includes('image/png'));
+  assert.ok(mixed.includes('application/pdf'));
+  assert.equal(parseMimeTypes('').length, 0, 'empty still permits nothing');
+  // Listed twice, kept once — the token overlapping an explicit entry is the
+  // obvious way to write it.
+  assert.equal(parseMimeTypes('readable,application/pdf').filter((m) => m === 'application/pdf').length, 1);
+});
+
+test('the content type and the file name have to agree', () => {
+  // Both fields come from the caller, so without this the allowlist is
+  // advisory: an .exe uploads cleanly by declaring application/pdf, and lands
+  // as a document our own read tools then refuse to open.
+  assert.throws(
+    () => assertFileAllowed('application/pdf', 'schadcode.exe', 100, readablePolicy),
+    /disagree/i,
+  );
+  assert.throws(
+    () => assertFileAllowed('text/csv', 'tabelle.xlsx', 100, readablePolicy),
+    /disagree/i,
+  );
+});
+
+test('a file with no extension is refused', () => {
+  // ELO stores the extension separately, and the read tools give it the final
+  // say because IX hands out application/octet-stream often enough.
+  assert.throws(() => assertFileAllowed('application/pdf', 'bericht', 100, readablePolicy), /no file extension/i);
+});
+
+test('a MIME type the registry does not know is left to the admin', () => {
+  // Someone who allowlisted image/png meant it; there is nothing to
+  // cross-check against, so only the allowlist and the size apply.
+  const withPng = { ...readablePolicy, mimeTypes: [...readablePolicy.mimeTypes, 'image/png'] };
+  assert.doesNotThrow(() => assertFileAllowed('image/png', 'logo.png', 100, withPng));
 });
 
 section('Write — idempotency');
