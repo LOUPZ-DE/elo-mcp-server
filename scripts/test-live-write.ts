@@ -18,6 +18,8 @@ import { randomBytes } from 'node:crypto';
 import { EloClient } from '../src/elo/client.js';
 import { isInsideFolder, refPathString, allIndexFields } from '../src/elo/sord.js';
 import { findInFolder, runFind } from '../src/elo/find.js';
+import { eloGetMetadata } from '../src/tools/elo_get_metadata.js';
+import { eloGetDocumentContent } from '../src/tools/elo_get_document_content.js';
 import {
   createFolder,
   readSnapshot,
@@ -179,6 +181,93 @@ async function main(): Promise<void> {
     'ELO stores the extension it was given, which is what the read tools key on',
     String(docxBack.version?.ext ?? '').toUpperCase() === 'DOCX' ||
       `ext is "${String(docxBack.version?.ext)}"`,
+  );
+
+  // 3c. Issue #15: read an OLDER version back, by the identifier the read
+  // tools hand out. Plain text rather than the fake PDF above, so the
+  // assertion is about versioning and not about a parser.
+  const readOpts = {
+    webclientBaseUrl: process.env.ELO_WEBCLIENT_URL ?? 'https://elo-link.loupz.de',
+    maxBytes: 10 * 1024 * 1024,
+    maxChars: 50_000,
+    timeoutMs: 60_000,
+  };
+  const metaOpts = { webclientBaseUrl: readOpts.webclientBaseUrl };
+
+  const note = await uploadDocument(
+    client,
+    {
+      parentId: folder.objId,
+      name: `Notiz ${run}`,
+      maskName: DOCUMENT_MASK,
+      bytes: Buffer.from(`version one ${run}`, 'utf8'),
+      fileName: `notiz-${run}.txt`,
+      contentType: 'text/plain',
+      ext: 'txt',
+      versionComment: 'erste Fassung',
+    },
+    transport,
+  );
+  await assertInSandbox(note.objId, 'the note');
+  const metaV1 = await eloGetMetadata(client, { objId: note.objId }, metaOpts);
+  const noteV1 = metaV1.docVersion?.versionId;
+  check(
+    'elo_get_metadata reports a usable versionId, not an empty version field',
+    (noteV1 !== undefined && /^\d+$/.test(noteV1)) || `versionId was ${JSON.stringify(noteV1)}`,
+  );
+
+  const noteSnapshot = await readSnapshot(client, note.objId);
+  await addDocumentVersion(
+    client,
+    noteSnapshot.sord,
+    {
+      bytes: Buffer.from(`version two ${run}`, 'utf8'),
+      fileName: `notiz-${run}.txt`,
+      contentType: 'text/plain',
+      ext: 'txt',
+      versionComment: 'zweite Fassung',
+    },
+    transport,
+  );
+  const metaV2 = await eloGetMetadata(client, { objId: note.objId }, metaOpts);
+  const noteV2 = metaV2.docVersion?.versionId;
+  check(
+    'the versionId moves when a version is checked in',
+    (noteV2 !== undefined && noteV2 !== noteV1) || `noteV1=${String(noteV1)} noteV2=${String(noteV2)}`,
+  );
+  check(
+    'metadata says earlier versions exist, since it cannot list them',
+    (metaV2.historyEntryCount ?? 0) > 1 || `historyEntryCount=${String(metaV2.historyEntryCount)}`,
+  );
+
+  const current = await eloGetDocumentContent(client, { objId: note.objId }, readOpts);
+  check(
+    'without a version the current one is served',
+    current.text.includes(`version two ${run}`) || `text was "${current.text.slice(0, 60)}"`,
+  );
+
+  const original = await eloGetDocumentContent(
+    client, { objId: note.objId, version: noteV1! }, readOpts,
+  );
+  check(
+    'the ORIGINAL version is readable by its versionId — the point of issue #15',
+    (original.text.includes(`version one ${run}`) &&
+      !original.text.includes(`version two ${run}`)) ||
+      `text was "${original.text.slice(0, 60)}"`,
+  );
+
+  // IX does not scope docId to objId, so the tool has to.
+  const foreign = await eloGetMetadata(client, { objId: docx.objId }, metaOpts);
+  const foreignId = foreign.docVersion?.versionId;
+  let refused = 'no error was raised';
+  try {
+    await eloGetDocumentContent(client, { objId: note.objId, version: foreignId! }, readOpts);
+  } catch (err) {
+    refused = err instanceof Error ? err.message : String(err);
+  }
+  check(
+    'a version id from another document is refused, not silently served',
+    /does not belong to/i.test(refused) || refused,
   );
 
   // 4. Metadata

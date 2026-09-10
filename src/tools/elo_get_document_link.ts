@@ -1,10 +1,11 @@
 import { z } from 'zod';
 import { EloClient } from '../elo/client.js';
-import { LOCK_Z_NO, DOC_VERSION_Z_ALL, EDIT_INFO_Z_ALL, isFolder } from '../elo/constants.js';
+import { LOCK_Z_NO, EDIT_INFO_Z_ALL, isFolder } from '../elo/constants.js';
 import { buildEloLink, parentIdOf, refPathString } from '../elo/sord.js';
 import { resolveStreamUrl } from '../elo/streamUrl.js';
 import { logger } from '../utils/logger.js';
 import type { CheckoutResponse } from '../elo/types.js';
+import { versionSizeBytes } from '../elo/docVersion.js';
 
 export const GetDocumentLinkInputSchema = {
   objId: z.string().min(1).describe('ELO object ID of the document'),
@@ -45,7 +46,6 @@ export async function eloGetDocumentLink(
     // gets two different links depending on which tool produced it. That
     // inconsistency is exactly what the pilot reported.
     editInfoZ: EDIT_INFO_Z_ALL,
-    docVersionZ: DOC_VERSION_Z_ALL,
     lockZ: LOCK_Z_NO,
   };
 
@@ -85,6 +85,6 @@ export async function eloGetDocumentLink(
       : undefined,
     contentType: latestVersion?.contentType,
     ext: latestVersion?.ext,
-    sizeBytes: latestVersion?.size,
+    sizeBytes: versionSizeBytes(latestVersion),
   };
 }

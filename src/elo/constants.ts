@@ -25,4 +25,9 @@ export const EDIT_INFO_Z_ALL = {
   bset: '-1',
   sordZ: { bset: '-1' },
 } as const;
-export const DOC_VERSION_Z_ALL = { bset: '-1' } as const;
+// There is deliberately no DOC_VERSION_Z here. `checkoutDoc` takes exactly
+// (ci, docId, objId, lockZ, editInfoZ) — read off this instance's OpenAPI — and
+// a `docVersionZ` we sent for months was silently discarded. It never returned
+// the version history it looked like it was asking for: `document.docs` holds
+// the working version and nothing else. Selecting a version is what `docId`
+// does. Issue #15 has the measurements.

@@ -3,6 +3,7 @@ import { EloClient } from '../elo/client.js';
 import { LOCK_Z_NO, EDIT_INFO_Z_ALL, isFolder } from '../elo/constants.js';
 import { allIndexFields, buildEloLink, parentIdOf, refPathString } from '../elo/sord.js';
 import type { CheckoutResponse } from '../elo/types.js';
+import { toDocVersionView, type DocVersionView } from '../elo/docVersion.js';
 
 export const GetMetadataInputSchema = {
   objId: z.string().min(1).describe('ELO object ID'),
@@ -25,13 +26,18 @@ export interface DocumentMetadata {
   createDateIso?: string;
   xDateIso?: string;
   indexFields: Record<string, string>;
-  docVersion?: {
-    version?: string;
-    comment?: string;
-    contentType?: string;
-    ext?: string;
-    sizeBytes?: number;
-  };
+  /**
+   * The version ELO serves by default — the only one this instance hands out.
+   * Its `versionId` is what elo_get_document_content takes as `version`.
+   */
+  docVersion?: DocVersionView;
+  /**
+   * How many history entries ELO counts for this object. Present only when it
+   * suggests more than the one version above, so that a caller is not left
+   * believing the document has only ever had one.
+   */
+  historyEntryCount?: number;
+  note?: string;
 }
 
 export interface GetMetadataOptions {
@@ -65,6 +71,11 @@ export async function eloGetMetadata(
   }
 
   const latestVersion = response.result?.document?.docs?.[0];
+  // Sord.histCount is ELO's own counter. It is the only signal this server has
+  // that a document ever had more than the version it can hand back, so it is
+  // reported rather than quietly dropped.
+  const histCount = typeof sord.histCount === 'number' ? sord.histCount : undefined;
+  const olderVersionsExist = !isFolder(sord.type) && histCount !== undefined && histCount > 1;
 
   return {
     objId: sord.id,
@@ -81,14 +92,15 @@ export async function eloGetMetadata(
     // undefined on every single call before this was fixed.
     xDateIso: sord.XDateIso ?? sord.xDateIso,
     indexFields: allIndexFields(sord),
-    docVersion: latestVersion
+    docVersion: toDocVersionView(latestVersion),
+    ...(olderVersionsExist ? { historyEntryCount: histCount } : {}),
+    ...(olderVersionsExist
       ? {
-          version: latestVersion.version,
-          comment: latestVersion.comment,
-          contentType: latestVersion.contentType,
-          ext: latestVersion.ext,
-          sizeBytes: latestVersion.size,
+          note:
+            `ELO counts ${histCount} history entries for this object, so earlier versions exist. ` +
+            'This ELO installation offers no way to list them — checkoutSordHistory returns nothing ' +
+            'and no other call exposes the version history. Only the version above can be retrieved.',
         }
-      : undefined,
+      : {}),
   };
 }

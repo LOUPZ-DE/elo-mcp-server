@@ -15,7 +15,7 @@
 
 import { loadConfig } from '../src/utils/config.js';
 import { EloClient } from '../src/elo/client.js';
-import { SORD_Z_ALL, EDIT_INFO_Z_ALL, DOC_VERSION_Z_ALL, LOCK_Z_NO, isFolder } from '../src/elo/constants.js';
+import { SORD_Z_ALL, EDIT_INFO_Z_ALL, LOCK_Z_NO, isFolder } from '../src/elo/constants.js';
 
 const cfg = loadConfig();
 const client = new EloClient({
@@ -820,7 +820,6 @@ async function battery(): Promise<void> {
       const res = await client.request<any>('/rest/IXServicePortIF/checkoutDoc', {
         objId: sampleDoc.id,
         editInfoZ: EDIT_INFO_Z_ALL,
-        docVersionZ: DOC_VERSION_Z_ALL,
         lockZ: LOCK_Z_NO,
       });
       const editInfo = res.result;

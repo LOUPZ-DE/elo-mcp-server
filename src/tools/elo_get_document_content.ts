@@ -1,10 +1,11 @@
 import { z } from 'zod';
 import { EloClient, EloContentTooLargeError, EloStaleStreamError } from '../elo/client.js';
-import { LOCK_Z_NO, DOC_VERSION_Z_ALL, EDIT_INFO_Z_ALL, isFolder } from '../elo/constants.js';
+import { LOCK_Z_NO, EDIT_INFO_Z_ALL, isFolder } from '../elo/constants.js';
 import { buildEloLink, parentIdOf, refPathString } from '../elo/sord.js';
 import { extractText } from '../extract/index.js';
 import { logger } from '../utils/logger.js';
 import type { CheckoutResponse, EloDocVersion, EloSord } from '../elo/types.js';
+import { versionIdOf, versionSizeBytes } from '../elo/docVersion.js';
 
 export const GetDocumentContentInputSchema = {
   objId: z.string().min(1).describe('ELO object ID of the document'),
@@ -24,7 +25,10 @@ export const GetDocumentContentInputSchema = {
   version: z
     .string()
     .optional()
-    .describe('Specific document version. Defaults to the current one.'),
+    .describe(
+      'The versionId of a specific version, as reported by elo_get_metadata. ' +
+        'Defaults to the current version.',
+    ),
 };
 
 const GetDocumentContentArgs = z.object(GetDocumentContentInputSchema);
@@ -40,7 +44,12 @@ export interface DocumentContent {
   contentType?: string;
   fileExtension?: string;
   sizeBytes?: number;
+  /** Pass this back as `version` to read exactly this version again. */
+  versionId?: string;
   version?: string;
+  isWorkingVersion?: boolean;
+  versionComment?: string;
+  versionCreatedIso?: string;
   /** Which acquisition path worked — instrumentation for the pilot. */
   contentSource: 'inline' | 'stream';
   extractor: string;
@@ -101,7 +110,7 @@ export async function eloGetDocumentContent(
     );
   }
 
-  const doc = selectVersion(docs, args.version, sord.name, eloLink);
+  const doc = await resolveVersion(client, args.objId, args.version, docs, sord.name, eloLink);
 
   // --- acquire bytes -------------------------------------------------------
   let bytes: Buffer;
@@ -149,8 +158,12 @@ export async function eloGetDocumentContent(
     parentId: parentIdOf(sord),
     contentType: doc.contentType,
     fileExtension: doc.ext,
-    sizeBytes: doc.size ?? bytes.length,
-    version: doc.version,
+    sizeBytes: versionSizeBytes(doc) ?? bytes.length,
+    versionId: versionIdOf(doc),
+    ...(doc.version ? { version: doc.version } : {}),
+    isWorkingVersion: doc.workVersion,
+    versionComment: doc.comment || undefined,
+    versionCreatedIso: doc.createDateIso || undefined,
     contentSource,
     extractor: extracted.extractor,
     format: extracted.format,
@@ -176,25 +189,68 @@ async function checkoutDoc(client: EloClient, objId: string): Promise<CheckoutRe
   return client.request<CheckoutResponse>('/rest/IXServicePortIF/checkoutDoc', {
     objId,
     editInfoZ: EDIT_INFO_Z_ALL,
-    docVersionZ: DOC_VERSION_Z_ALL,
     lockZ: LOCK_Z_NO,
   });
 }
 
-function selectVersion(
-  docs: EloDocVersion[],
+/**
+ * Find the version the caller asked for.
+ *
+ * `document.docs` holds the working version and nothing else, so an older
+ * version cannot be picked out of a list — it has to be fetched. `checkoutDoc`'s
+ * `docId` is the one selector this instance offers, and `versionId` from
+ * elo_get_metadata is exactly that value.
+ *
+ * The guard at the end is not defensive tidiness. **IX does not scope `docId` to
+ * `objId`**: asking for objId 572450 with a docId belonging to 572448 returned
+ * the other document's version, with no error. Without the check, "version X of
+ * document Y" would quietly serve document Z.
+ */
+export async function resolveVersion(
+  client: EloClient,
+  objId: string,
   wanted: string | undefined,
+  docs: EloDocVersion[],
   name: string,
   eloLink: string,
-): EloDocVersion {
-  if (!wanted) return docs[0]!;
-  const match = docs.find((d) => d.version === wanted);
-  if (match) return match;
-  const available = docs.map((d) => d.version).filter(Boolean).join(', ');
-  throw new DocumentContentError(
-    `"${name}" has no version "${wanted}". Available: ${available || '(none)'}.`,
-    eloLink,
-  );
+): Promise<EloDocVersion> {
+  const working = docs[0]!;
+  if (!wanted) return working;
+  if (versionIdOf(working) === wanted || (working.version && working.version === wanted)) {
+    return working;
+  }
+
+  let response: CheckoutResponse;
+  try {
+    response = await client.request<CheckoutResponse>('/rest/IXServicePortIF/checkoutDoc', {
+      objId,
+      docId: wanted,
+      editInfoZ: EDIT_INFO_Z_ALL,
+      lockZ: LOCK_Z_NO,
+    });
+  } catch {
+    throw new DocumentContentError(
+      `"${name}" has no version "${wanted}". Use the versionId from elo_get_metadata; ` +
+        `the current version is "${versionIdOf(working) ?? 'unknown'}".`,
+      eloLink,
+    );
+  }
+
+  const owner = response.result?.sord;
+  const version = response.result?.document?.docs?.[0];
+  const belongsHere =
+    String(owner?.id ?? '') === String(objId) &&
+    String(response.result?.document?.objId ?? objId) === String(objId);
+
+  if (!version || !belongsHere) {
+    throw new DocumentContentError(
+      `Version "${wanted}" does not belong to "${name}" (objId ${objId}). ` +
+        'Version ids are archive-wide, so one from another document resolves but is refused here. ' +
+        'Take the versionId from elo_get_metadata for this document.',
+      eloLink,
+    );
+  }
+  return version;
 }
 
 /**

@@ -41,6 +41,14 @@ export interface EloSord {
   parentIds?: Array<string | number>;
   /** Number of direct children. 0 on documents and on empty folders. */
   childCount?: number;
+  /**
+   * ELO's history counter for this object. On a document with two versions it
+   * reads 2 — the only hint the REST API gives that earlier versions exist,
+   * since nothing here can enumerate them (issue #15).
+   */
+  histCount?: number;
+  /** docId of the working version, matching `document.docs[0].id`. */
+  doc?: number;
   /** "Extra text" / description field of the mask. */
   desc?: string;
   deleted?: boolean;
@@ -60,14 +68,38 @@ export interface EloFileData {
 }
 
 export interface EloDocVersion {
-  id?: string;
+  /**
+   * The document-version id, and the only usable version identifier here.
+   *
+   * IX returns it as a JSON *number*, and it is what `checkoutDoc`'s `docId`
+   * selects on. Note it is archive-global, not scoped to the object — see the
+   * guard in `elo_get_document_content`.
+   */
+  id?: string | number;
+  /**
+   * ELO's own version label. Measured empty on this instance for every version
+   * of every document, which is why `id` carries the identity instead.
+   */
   version?: string;
   comment?: string;
   contentType?: string;
   /** Uppercase file extension, e.g. "PDF", "DOCX", "ECF". */
   ext?: string;
-  size?: number;
+  /** IX sends this as a string ("57"), the JavaDoc says int. Both turn up. */
+  size?: number | string;
   md5?: string;
+  guid?: string;
+  /** When this version was checked in. */
+  createDateIso?: string;
+  /** When it last changed. */
+  updateDateIso?: string;
+  accessDateIso?: string;
+  ownerName?: string;
+  ownerId?: number;
+  /** True for the version ELO serves by default. */
+  workVersion?: boolean;
+  milestone?: boolean;
+  deleted?: boolean;
   /**
    * Absolute IX URL — but in practice it points at the *internal* host
    * (`<internal-host>:9090`), which is unreachable from the container.

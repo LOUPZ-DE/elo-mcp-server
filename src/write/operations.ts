@@ -1,7 +1,6 @@
 import { createHash } from 'node:crypto';
 import { EloClient } from '../elo/client.js';
 import {
-  DOC_VERSION_Z_ALL,
   EDIT_INFO_Z_ALL,
   LOCK_Z_NO,
   SORD_Z_ALL,
@@ -55,7 +54,7 @@ export interface TargetSnapshot {
 export async function readSnapshot(client: EloClient, objId: string): Promise<TargetSnapshot> {
   const response = await client.request<CheckoutResponse>(
     '/rest/IXServicePortIF/checkoutDoc',
-    { objId, editInfoZ: EDIT_INFO_Z_ALL, docVersionZ: DOC_VERSION_Z_ALL, lockZ: LOCK_Z_NO },
+    { objId, editInfoZ: EDIT_INFO_Z_ALL, lockZ: LOCK_Z_NO },
   );
   const sord = response.result?.sord;
   if (!sord) {

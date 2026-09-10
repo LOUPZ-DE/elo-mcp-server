@@ -8,6 +8,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **An older version of a document can be read** (#15). `elo_get_metadata` now
+  reports a `versionId`, and `elo_get_document_content` takes it as `version`
+  and fetches exactly that version.
+
+  The `version` parameter had never worked. It matched on `EloDocVersion.version`
+  — the field whose name promises to be the version — and this instance leaves
+  that empty for every version of every document, so every attempt answered
+  `Available: (none)`. What is populated is `id`, and `id` is what
+  `checkoutDoc`’s `docId` selects on.
+
+  Version metadata gained what IX actually sends: `guid`, `createDateIso`,
+  `updateDateIso`, `ownerName`, `md5`, `isWorkingVersion`, `isMilestone`. The
+  timestamps are not `IDateIso`/`XDateIso` as the sord uses; per-version they
+  are named differently.
+
+  **`sizeBytes` was reporting a string.** IX sends `size: "57"`, the type said
+  `number`, and three tools passed it straight through. It is coerced now, and
+  the compiler found all three the moment the type told the truth.
+
+  Listing *all* versions remains impossible on this installation and is
+  deliberately not faked: no REST path exposes the `DocHistory` schema,
+  `checkoutSordHistory` returns `[]`, and the `VersionHistory` plugin is not
+  loaded. Where ELO’s own counter says earlier versions exist, the metadata
+  says so in a `note` rather than implying the document only ever had one.
 - **Uploads may be as large as the read tools allow.** `ELO_WRITE_MAX_BYTES`
   left unset now follows `ELO_MAX_DOCUMENT_BYTES` (15 MiB by default) instead
   of its own 10 MiB: a document the server will read out of the archive is one
@@ -121,6 +145,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cannot make.
 
 ### Fixed
+- **A version id from another document was served without complaint.** IX does
+  not scope `docId` to `objId`: asking for objId 572450 with a docId belonging
+  to 572448 returns the other document’s version, no error. Since version ids
+  are archive-wide, “version X of document Y” could quietly deliver document Z.
+  `elo_get_document_content` now verifies the answer belongs to the object that
+  was asked for, and refuses otherwise.
+- **`docVersionZ` was never a parameter.** `checkoutDoc` takes
+  `(ci, docId, objId, lockZ, editInfoZ)` on this instance — measured from its
+  own OpenAPI. The selector we sent on four call sites was silently discarded,
+  and it was never what returned version data. Removed, along with the
+  constant, so nobody sends it again believing it does something.
+
 - **A request body over the limit reported itself as a server error.** The
   Express error handler ignored the status the body parser had already set, so
   an oversized upload came back as 500 `server_error` with the reason visible
