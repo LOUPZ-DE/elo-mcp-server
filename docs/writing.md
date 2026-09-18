@@ -48,8 +48,8 @@ ELO_WRITE_ENABLED=true
 ELO_WRITE_ROOT_IDS=567085          # required, non-empty
 ELO_WRITE_MASKS=Ordner,Freie Eingabe   # required, non-empty
 ELO_WRITE_FIELDS=                  # empty ⇒ no index field may be written
-ELO_WRITE_MIME_TYPES=application/pdf
-ELO_WRITE_MAX_BYTES=10485760
+ELO_WRITE_MIME_TYPES=readable      # or explicit types, e.g. application/pdf
+ELO_WRITE_MAX_BYTES=               # empty ⇒ follows ELO_MAX_DOCUMENT_BYTES (15 MiB)
 ELO_WRITE_PREFLIGHT_TTL=300
 ```
 
