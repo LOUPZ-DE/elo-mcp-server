@@ -14,7 +14,8 @@
 // mask name is accepted where maskId is asked for.
 
 import 'dotenv/config';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
+import JSZip from 'jszip';
 import { EloClient } from '../src/elo/client.js';
 import { isInsideFolder, refPathString, allIndexFields } from '../src/elo/sord.js';
 import { findInFolder, runFind } from '../src/elo/find.js';
@@ -61,6 +62,44 @@ function check(label: string, ok: boolean | string): void {
   failures++;
   console.log(`  FAIL ${label}`);
   console.log(`       ${typeof ok === 'string' ? ok : 'assertion failed'}`);
+}
+
+const md5 = (bytes: Buffer): string => createHash('md5').update(bytes).digest('hex').toUpperCase();
+
+/**
+ * A real Word document — the smallest one Word will open.
+ *
+ * The first version of this test uploaded a few bytes of text under a .docx
+ * name. ELO accepted them, which was the point, but anyone who then opened the
+ * file got Word's "unreadable content" dialog and an OCR timeout in the ELO
+ * preview. A fixture that only proves ELO takes bytes cannot show that a file
+ * arrives intact and usable; this one can be opened, and read back by mammoth.
+ */
+async function minimalDocx(paragraph: string): Promise<Buffer> {
+  const zip = new JSZip();
+  zip.file(
+    '[Content_Types].xml',
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+      '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+      '<Default Extension="xml" ContentType="application/xml"/>' +
+      '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>' +
+      '</Types>',
+  );
+  zip.file(
+    '_rels/.rels',
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+      '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>' +
+      '</Relationships>',
+  );
+  zip.file(
+    'word/document.xml',
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
+      `<w:body><w:p><w:r><w:t>${paragraph}</w:t></w:r></w:p></w:body></w:document>`,
+  );
+  return zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
 }
 
 const client = new EloClient({
@@ -160,13 +199,15 @@ async function main(): Promise<void> {
   // format the allowlist now permits gets proved rather than assumed.
   const DOCX_MIME =
     'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+  const docxParagraph = `MCP live write test ${run} — ein echtes Word-Dokument`;
+  const docxBytes = await minimalDocx(docxParagraph);
   const docx = await uploadDocument(
     client,
     {
       parentId: folder.objId,
       name: `Protokoll ${run}`,
       maskName: DOCUMENT_MASK,
-      bytes: Buffer.from(`PK MCP live write test ${run}`),
+      bytes: docxBytes,
       fileName: `protokoll-${run}.docx`,
       contentType: DOCX_MIME,
       ext: 'docx',
@@ -181,6 +222,30 @@ async function main(): Promise<void> {
     'ELO stores the extension it was given, which is what the read tools key on',
     String(docxBack.version?.ext ?? '').toUpperCase() === 'DOCX' ||
       `ext is "${String(docxBack.version?.ext)}"`,
+  );
+  // Byte integrity, by the hash ELO computed on ITS side. Accepting an upload
+  // says nothing about what was stored; this does.
+  check(
+    'the stored bytes are the bytes that were sent — ELO’s md5 matches ours',
+    String(docxBack.version?.md5 ?? '').toUpperCase() === md5(docxBytes) ||
+      `ELO md5 ${String(docxBack.version?.md5)}, ours ${md5(docxBytes)}`,
+  );
+  // And it is a document, not merely a file: our own extractor opens it. What
+  // mammoth cannot parse, Word will not open either.
+  const docxText = await eloGetDocumentContent(
+    client,
+    { objId: docx.objId },
+    {
+      webclientBaseUrl: process.env.ELO_WEBCLIENT_URL ?? 'https://elo-link.loupz.de',
+      maxBytes: 10 * 1024 * 1024,
+      maxChars: 50_000,
+      timeoutMs: 60_000,
+    },
+  );
+  check(
+    'the Word document reads back as a Word document, paragraph intact',
+    (docxText.extractor === 'docx' && docxText.text.includes(docxParagraph)) ||
+      `extractor=${docxText.extractor} text="${docxText.text.slice(0, 60)}" ${docxText.notice ?? ''}`,
   );
 
   // 3c. Issue #15: read an OLDER version back, by the identifier the read
