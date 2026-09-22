@@ -300,9 +300,27 @@ async function main(): Promise<void> {
     'the versionId moves when a version is checked in',
     (noteV2 !== undefined && noteV2 !== noteV1) || `noteV1=${String(noteV1)} noteV2=${String(noteV2)}`,
   );
+  // Issue #16: docId -1 hands back the whole history, so the list is real
+  // rather than a single entry dressed up as one.
   check(
-    'metadata says earlier versions exist, since it cannot list them',
-    (metaV2.historyEntryCount ?? 0) > 1 || `historyEntryCount=${String(metaV2.historyEntryCount)}`,
+    'metadata lists BOTH versions, newest first',
+    (metaV2.versions?.length === 2 &&
+      metaV2.versions[0]!.versionId === noteV2 &&
+      metaV2.versions[1]!.versionId === noteV1) ||
+      `versions=${JSON.stringify(metaV2.versions?.map((v) => v.versionId))}`,
+  );
+  check(
+    'each listed version carries its own comment and timestamp',
+    (metaV2.versions?.[1]?.comment === 'erste Fassung' &&
+      metaV2.versions?.[0]?.comment === 'zweite Fassung' &&
+      /^\d{14}$/.test(String(metaV2.versions?.[1]?.createDateIso))) ||
+      `v1=${JSON.stringify(metaV2.versions?.[1])}`,
+  );
+  check(
+    'the working version is flagged, the earlier one is not',
+    (metaV2.versions?.[0]?.isWorkingVersion === true &&
+      metaV2.versions?.[1]?.isWorkingVersion === false) ||
+      `flags=${String(metaV2.versions?.map((v) => v.isWorkingVersion))}`,
   );
 
   const current = await eloGetDocumentContent(client, { objId: note.objId }, readOpts);
@@ -332,7 +350,10 @@ async function main(): Promise<void> {
   }
   check(
     'a version id from another document is refused, not silently served',
-    /does not belong to/i.test(refused) || refused,
+    // Since docId -1 hands back this document's own versions, a foreign id is
+    // simply absent from the list — no cross-object call is made at all, and
+    // the refusal can name what there is instead of only what there is not.
+    (/has no version/i.test(refused) && refused.includes(noteV1!)) || refused,
   );
 
   // 4. Metadata

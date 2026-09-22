@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { EloClient, EloContentTooLargeError, EloStaleStreamError } from '../elo/client.js';
-import { LOCK_Z_NO, EDIT_INFO_Z_ALL, isFolder } from '../elo/constants.js';
+import { LOCK_Z_NO, EDIT_INFO_Z_ALL, DOC_ID_ALL_VERSIONS, isFolder } from '../elo/constants.js';
 import { buildEloLink, parentIdOf, refPathString } from '../elo/sord.js';
 import { extractText } from '../extract/index.js';
 import { logger } from '../utils/logger.js';
@@ -26,8 +26,8 @@ export const GetDocumentContentInputSchema = {
     .string()
     .optional()
     .describe(
-      'The versionId of a specific version, as reported by elo_get_metadata. ' +
-        'Defaults to the current version.',
+      'The versionId of a specific version, from the `versions` list of ' +
+        'elo_get_metadata. Defaults to the current version.',
     ),
 };
 
@@ -110,7 +110,7 @@ export async function eloGetDocumentContent(
     );
   }
 
-  const doc = await resolveVersion(client, args.objId, args.version, docs, sord.name, eloLink);
+  const doc = resolveVersion(args.version, docs, sord.name, eloLink);
 
   // --- acquire bytes -------------------------------------------------------
   let bytes: Buffer;
@@ -188,69 +188,43 @@ export async function eloGetDocumentContent(
 async function checkoutDoc(client: EloClient, objId: string): Promise<CheckoutResponse> {
   return client.request<CheckoutResponse>('/rest/IXServicePortIF/checkoutDoc', {
     objId,
+    // The whole history, so an older version can be picked without a second
+    // call — and without ever addressing a docId from another document.
+    docId: DOC_ID_ALL_VERSIONS,
     editInfoZ: EDIT_INFO_Z_ALL,
     lockZ: LOCK_Z_NO,
   });
 }
 
 /**
- * Find the version the caller asked for.
+ * Find the version the caller asked for, among this document's own versions.
  *
- * `document.docs` holds the working version and nothing else, so an older
- * version cannot be picked out of a list — it has to be fetched. `checkoutDoc`'s
- * `docId` is the one selector this instance offers, and `versionId` from
- * elo_get_metadata is exactly that value.
- *
- * The guard at the end is not defensive tidiness. **IX does not scope `docId` to
- * `objId`**: asking for objId 572450 with a docId belonging to 572448 returned
- * the other document's version, with no error. Without the check, "version X of
- * document Y" would quietly serve document Z.
+ * The checkout asks for `docId: -1`, so `docs` is the whole history rather than
+ * the working version alone. Picking from that list is what makes a version id
+ * from another document harmless: ids are archive-wide, and `checkoutDoc` will
+ * happily answer for a `docId` that belongs to a different object — measured,
+ * no error raised. Selecting from the list we already hold cannot stray.
  */
-export async function resolveVersion(
-  client: EloClient,
-  objId: string,
+export function resolveVersion(
   wanted: string | undefined,
   docs: EloDocVersion[],
   name: string,
   eloLink: string,
-): Promise<EloDocVersion> {
+): EloDocVersion {
   const working = docs[0]!;
   if (!wanted) return working;
-  if (versionIdOf(working) === wanted || (working.version && working.version === wanted)) {
-    return working;
-  }
 
-  let response: CheckoutResponse;
-  try {
-    response = await client.request<CheckoutResponse>('/rest/IXServicePortIF/checkoutDoc', {
-      objId,
-      docId: wanted,
-      editInfoZ: EDIT_INFO_Z_ALL,
-      lockZ: LOCK_Z_NO,
-    });
-  } catch {
-    throw new DocumentContentError(
-      `"${name}" has no version "${wanted}". Use the versionId from elo_get_metadata; ` +
-        `the current version is "${versionIdOf(working) ?? 'unknown'}".`,
-      eloLink,
-    );
-  }
+  const match = docs.find(
+    (d) => versionIdOf(d) === wanted || (d.version && d.version === wanted),
+  );
+  if (match) return match;
 
-  const owner = response.result?.sord;
-  const version = response.result?.document?.docs?.[0];
-  const belongsHere =
-    String(owner?.id ?? '') === String(objId) &&
-    String(response.result?.document?.objId ?? objId) === String(objId);
-
-  if (!version || !belongsHere) {
-    throw new DocumentContentError(
-      `Version "${wanted}" does not belong to "${name}" (objId ${objId}). ` +
-        'Version ids are archive-wide, so one from another document resolves but is refused here. ' +
-        'Take the versionId from elo_get_metadata for this document.',
-      eloLink,
-    );
-  }
-  return version;
+  const available = docs.map((d) => versionIdOf(d)).filter(Boolean).join(', ');
+  throw new DocumentContentError(
+    `"${name}" has no version "${wanted}". Available: ${available || '(none)'}. ` +
+      'Take a versionId from elo_get_metadata for this document.',
+    eloLink,
+  );
 }
 
 /**

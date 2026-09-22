@@ -8,6 +8,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **The full version history of a document is readable** (#16). `elo_get_metadata`
+  returns a `versions` array, newest first, each entry with its `versionId`,
+  comment, created and updated timestamps, size, md5, owner and whether it is the
+  working version. Any of those ids goes straight into `elo_get_document_content`.
+
+  The missing piece was never a plugin or an archive setting, as #15 and #16 had
+  concluded — it was `docId`. Omit it and `checkoutDoc` returns the working
+  version alone; send `-1` and it returns the whole history. Confirmed by ELO
+  support and then measured: a folder answers with 0 entries, a one-version
+  document with 1, a two-version document with 2, so it is safe to send on every
+  call. `editInfoZ` must stay an object, though — the string form that came with
+  the support answer returns an empty `docs` array.
+
+  This also removed the second `checkoutDoc` that fetching an older version used
+  to need, and with it the hazard it carried. Version ids are archive-wide and IX
+  answers for one belonging to a different object without complaint, so that path
+  needed a guard. Choosing from the document’s own list cannot stray, and a wrong
+  id now gets an error naming the versions there are.
 - **An older version of a document can be read** (#15). `elo_get_metadata` now
   reports a `versionId`, and `elo_get_document_content` takes it as `version`
   and fetches exactly that version.

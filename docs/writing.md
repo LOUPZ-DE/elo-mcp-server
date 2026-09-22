@@ -135,7 +135,7 @@ sha256(id, change date, name, all index fields, version id|number|md5)
 The version identity is in there because a document-version checkin **does not
 move `XDateIso`** — measured against the live instance, and covered by a
 regression check in `npm run test:oauth`. The target is read through
-`checkoutDoc`, the only call that returns both the sord and its versions.
+`checkoutDoc`, which returns the sord and, with `docId: -1`, its versions.
 
 Locking was considered and rejected: the `LockC` bitmask values are not
 derivable from the instance's OpenAPI document (the schemas carry names but no

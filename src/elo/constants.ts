@@ -25,9 +25,17 @@ export const EDIT_INFO_Z_ALL = {
   bset: '-1',
   sordZ: { bset: '-1' },
 } as const;
-// There is deliberately no DOC_VERSION_Z here. `checkoutDoc` takes exactly
-// (ci, docId, objId, lockZ, editInfoZ) — read off this instance's OpenAPI — and
-// a `docVersionZ` we sent for months was silently discarded. It never returned
-// the version history it looked like it was asking for: `document.docs` holds
-// the working version and nothing else. Selecting a version is what `docId`
-// does. Issue #15 has the measurements.
+/**
+ * `docId` for "every version", not just the working one.
+ *
+ * `checkoutDoc` takes (ci, docId, objId, lockZ, editInfoZ) — there is no
+ * `docVersionZ`, and one we sent for months was silently discarded. The
+ * selector that matters is `docId`: omit it and `document.docs` holds the
+ * working version alone; pass -1 and it holds the whole history, newest first.
+ *
+ * Measured on this instance: a folder answers with 0 entries, a one-version
+ * document with 1, a two-version document with 2 — so it is safe to send
+ * everywhere. Note that `editInfoZ` must stay the object below; the string
+ * form `"sord"` returns an empty `docs` array. Issues #15 and #16.
+ */
+export const DOC_ID_ALL_VERSIONS = '-1';

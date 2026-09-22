@@ -1410,50 +1410,32 @@ test('an empty version label is left out rather than reported as empty', () => {
   assert.equal(view.comment, 'zweite Fassung');
 });
 
-const workingVersion = { id: 385196, version: '', comment: 'current' };
-const fakeClient = (result: unknown) =>
-  ({ request: async () => ({ result }) }) as never;
+// Newest first, as IX returns them for docId -1.
+const versions = [
+  { id: 385196, version: '', comment: 'zweite Fassung', workVersion: true },
+  { id: 385195, version: '', comment: 'erste Fassung', workVersion: false },
+];
 
-test('no version asked for means the working version, with no extra call', async () => {
-  const chosen = await resolveVersion(
-    fakeClient(null), '572450', undefined, [workingVersion], 'Testbericht', 'link',
-  );
-  assert.equal(chosen.comment, 'current');
+test('no version asked for means the working version', () => {
+  assert.equal(resolveVersion(undefined, versions, 'Notiz', 'link').comment, 'zweite Fassung');
 });
 
-test('asking for the working version by id does not re-fetch it', async () => {
-  const chosen = await resolveVersion(
-    fakeClient(null), '572450', '385196', [workingVersion], 'Testbericht', 'link',
-  );
-  assert.equal(chosen.comment, 'current');
+test('an older version is picked out of the list by its id', () => {
+  assert.equal(resolveVersion('385195', versions, 'Notiz', 'link').comment, 'erste Fassung');
+  assert.equal(resolveVersion('385196', versions, 'Notiz', 'link').comment, 'zweite Fassung');
 });
 
-test('an older version of THIS document is returned', async () => {
-  const chosen = await resolveVersion(
-    fakeClient({
-      sord: { id: '572450', name: 'Testbericht' },
-      document: { objId: '572450', docs: [{ id: 385195, comment: 'first' }] },
-    }),
-    '572450', '385195', [workingVersion], 'Testbericht', 'link',
-  );
-  assert.equal(chosen.comment, 'first');
-});
-
-test('a version belonging to another document is refused, not served', async () => {
-  // Measured: IX does not scope docId to objId. Asking for objId 572450 with a
-  // docId owned by 572448 returned the other document, with no error. Without
-  // this guard, "version X of document Y" quietly serves document Z.
-  await assert.rejects(
-    () =>
-      resolveVersion(
-        fakeClient({
-          sord: { id: '572448', name: 'Protokoll' },
-          document: { objId: '572448', docs: [{ id: 385194, comment: 'someone else' }] },
-        }),
-        '572450', '385194', [workingVersion], 'Testbericht', 'link',
-      ),
+test('a version id from another document simply is not in the list', () => {
+  // Version ids are archive-wide, and checkoutDoc answers for a docId that
+  // belongs to a different object without complaining — measured. Choosing
+  // from this document’s own versions is what makes that harmless.
+  assert.throws(
+    () => resolveVersion('385194', versions, 'Notiz', 'link'),
     (err: unknown) =>
-      err instanceof DocumentContentError && /does not belong to/i.test((err as Error).message),
+      err instanceof DocumentContentError &&
+      /has no version/i.test((err as Error).message) &&
+      // The error names what there is, which the old one could not.
+      /385196, 385195/.test((err as Error).message),
   );
 });
 
