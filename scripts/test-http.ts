@@ -317,6 +317,11 @@ async function main(): Promise<void> {
         ['folderId', 'elo_list_folder does not expose folderId'],
         ['Never build an ELO URL yourself', 'link tool does not forbid URL construction'],
         ['authoritative', 'exact-match guidance missing'],
+        // The workflow exists but a client can only use it if tools/list says
+        // so: the feature shipped in 263b898 without a word in the text the
+        // client actually receives (#17).
+        ['complete version history', 'metadata description does not name the version history'],
+        ['pass it as `version`', 'content description does not say how to read an earlier version'],
       ];
       const missing = required.filter(([needle]) => !body.includes(needle));
       return missing.length === 0 || missing.map(([, msg]) => msg).join('; ');

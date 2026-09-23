@@ -106,9 +106,27 @@ export function nextStepsForDocumentContent(result: DocumentContent): string[] {
 }
 
 export function nextStepsForMetadata(result: DocumentMetadata): string[] {
-  return result.type === 'document'
-    ? [`elo_get_document_content with {"objId":"${result.objId}"} to read what is inside it`]
-    : [`elo_list_folder with {"folderId":"${result.objId}"} to see what is filed in it`];
+  if (result.type !== 'document') {
+    return [`elo_list_folder with {"folderId":"${result.objId}"} to see what is filed in it`];
+  }
+
+  const steps = [
+    `elo_get_document_content with {"objId":"${result.objId}"} to read what is inside it`,
+  ];
+
+  // Only when there is an earlier version to read. A document with one version
+  // is the normal case, and a step that never applies teaches the model to skim
+  // the field rather than act on it.
+  const previous = result.versions?.[1];
+  if (previous?.versionId) {
+    const named = previous.comment ? ` ("${previous.comment}")` : '';
+    steps.push(
+      `elo_get_document_content with {"objId":"${result.objId}","version":"${previous.versionId}"}` +
+        ` to read the previous version${named} instead of the current one —` +
+        ` this document has ${result.versions!.length} versions`,
+    );
+  }
+  return steps;
 }
 
 export function nextStepsForWhoAmI(result: WhoAmIResult): string[] {

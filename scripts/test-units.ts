@@ -38,6 +38,7 @@ import { respond } from '../src/mcp/respond.js';
 import {
   nextStepsForDocumentContent,
   nextStepsForListFolder,
+  nextStepsForMetadata,
   nextStepsForProjectFolder,
   nextStepsForSearch,
   nextStepsForWhoAmI,
@@ -1365,6 +1366,36 @@ test('truncated text pages on, and says so', () => {
     objId: '700', truncated: true, nextOffset: 50_000, textLayer: 'present',
   } as never);
   assert.ok(steps[0]!.includes('"offset":50000'));
+});
+
+test('a document with one version gets one follow-up, not a version step', () => {
+  const steps = nextStepsForMetadata({
+    objId: '700', type: 'document',
+    versions: [{ versionId: '900', isWorkingVersion: true }],
+  } as never);
+  assert.equal(steps.length, 1);
+  assert.ok(steps[0]!.includes('elo_get_document_content'));
+  assert.ok(!steps[0]!.includes('version'), steps[0]);
+});
+
+test('a document with history offers the previous version, filled in', () => {
+  const steps = nextStepsForMetadata({
+    objId: '700', type: 'document',
+    versions: [
+      { versionId: '902', comment: 'zweite Fassung', isWorkingVersion: true },
+      { versionId: '901', comment: 'erste Fassung', isWorkingVersion: false },
+    ],
+  } as never);
+  assert.equal(steps.length, 2);
+  // Concrete: the call is ready to send, not a description of one.
+  assert.ok(steps[1]!.includes('"version":"901"'), steps[1]);
+  assert.ok(steps[1]!.includes('erste Fassung'), steps[1]);
+});
+
+test('a folder is never offered a version step', () => {
+  const steps = nextStepsForMetadata({ objId: '500', type: 'folder' } as never);
+  assert.equal(steps.length, 1);
+  assert.ok(steps[0]!.includes('elo_list_folder'));
 });
 
 test('whoami only suggests signing in when that would change something', () => {

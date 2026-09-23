@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **The version workflow is now something a client can find** (#17). Listing and
+  reading versions shipped in `263b898`, but nothing in `tools/list` said so —
+  the fullest description of it sat in a TypeScript comment, where no client
+  ever looks. `elo_get_metadata` now says it returns the complete history and
+  what each entry carries; `elo_get_document_content` says how to ask for an
+  earlier version and that the answer names the version it read.
+
+  A `nextStep` carries it too, and only when it applies: a document with an
+  earlier version gets the follow-up call already filled in, comment and all,
+  while a single-version document and a folder get nothing extra. A hint that
+  never applies teaches the model to skim the field rather than act on it.
+
+  `npm run test:http` asserts both descriptions reach the client, so the next
+  feature cannot ship invisible the same way.
 - **The full version history of a document is readable** (#16). `elo_get_metadata`
   returns a `versions` array, newest first, each entry with its `versionId`,
   comment, created and updated timestamps, size, md5, owner and whether it is the

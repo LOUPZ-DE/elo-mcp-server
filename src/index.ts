@@ -406,6 +406,7 @@ function createServer(): McpServer {
         title: 'Read ELO document text',
         description:
           'Returns the extracted text of a document — this is how you read what is actually inside a PDF, Word file, Excel workbook, e-mail (.eml/.msg) or text file in ELO. Use it whenever a question is about document *content* rather than about which documents exist.\n\n' +
+          'You get the current version unless you ask for another. To read an earlier one — what a document said before it was changed — take its `versionId` from the `versions` list of elo_get_metadata and pass it as `version`. The result repeats the `versionId`, `versionComment` and `versionCreatedIso` it actually read, so say which version you are quoting.\n\n' +
           `Long documents are truncated at around ${cfg.ELO_MAX_TEXT_CHARS.toLocaleString('en-US')} characters; when \`truncated\` is true, call again with \`offset\` set to the returned \`nextOffset\` to read on.\n\n` +
           'For an e-mail (.eml or .msg) the result begins with a From/To/Subject/Date block, then the message body; attachments are listed by name only, and are usually filed as separate ELO documents you can read individually.\n\n' +
           'An Excel workbook (.xlsx/.xlsm) comes back one sheet at a time: a `Sheet: <name>` heading, then one line per row with cells separated by ` | `. The first row is usually the header. Dates are resolved to calendar dates, so read them as written rather than as numbers.\n\n' +
@@ -433,6 +434,7 @@ function createServer(): McpServer {
       title: 'Get ELO object metadata',
       description:
         'Returns all index fields, mask, owner, dates and version info for an objId. Works for folders and documents.\n\n' +
+        'For a document it lists the complete version history in `versions`, newest first — each entry with its `versionId`, comment, created and updated timestamps, size and owner. This is the only way to see that a document was changed, and what the earlier versions were. Hand a `versionId` to elo_get_document_content as `version` to read that particular version.\n\n' +
         'Also returns `path` and `eloLink`, so this is a cheap way to verify which project an object belongs to before citing it. Returns metadata only — for the document text use elo_get_document_content.',
       inputSchema: GetMetadataInputSchema,
       annotations: readOnly,
