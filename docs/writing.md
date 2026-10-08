@@ -65,7 +65,7 @@ anything.
 
 | Limit | Enforced by | Note |
 |---|---|---|
-| target folder | `assertTargetAllowed` | against the sord **fetched from ELO**, via `isInsideFolder` — never against a path a caller supplied |
+| target folder | `assertTargetAllowed` | against the sord **fetched from ELO**, via `isInsideFolder` — never against a path a caller supplied. `*` removes this limit and only this one |
 | mask | `assertMaskAllowed` | exact name match |
 | index fields | `assertFieldsAllowed` | reports every rejected field at once, so one round trip is enough |
 | MIME type | `assertFileAllowed` | case-insensitive; `readable` expands to every type the read tools open |
@@ -76,6 +76,33 @@ anything.
 Base64 input is decoded, re-encoded and compared. `Buffer.from(x, 'base64')`
 never throws — it silently drops anything that is not base64 — so without that
 comparison a corrupted argument would arrive as a short, plausible-looking file.
+
+## Where writing is allowed
+
+`ELO_WRITE_ROOT_IDS` holds the objIds of the areas that may be written to.
+A target must be one of them or sit beneath one, checked against the object
+as ELO returns it rather than against anything the caller supplied.
+
+**Do not use the archive root.** ELO builds `refPaths[].path` *without* it, so
+`ELO_WRITE_ROOT_IDS=1` permits only objects whose direct parent is the root —
+the archive’s top level — and refuses everything inside them. Measured, and
+the opposite of what it looks like it does. Name the top-level folders
+themselves instead; everything beneath them carries them in the chain.
+
+The single value `*` removes the folder restriction altogether:
+
+```
+ELO_WRITE_ROOT_IDS=*
+```
+
+That is defensible, because a write already runs on the signed-in person’s own
+IX session and their ELO permissions are the real boundary. But it is also the
+only server-side say over *where*, so switching it off is a decision, not a
+convenience: the server logs a warning naming it on every boot.
+
+It opens that one boundary and no other. Masks, index fields, file types and
+sizes stay allowlisted, writing still needs a personal OAuth sign-in, and every
+change still takes a preview and a confirmation.
 
 ## File types
 

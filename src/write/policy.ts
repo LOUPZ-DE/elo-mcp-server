@@ -29,6 +29,22 @@ export interface WritePolicy {
   maxBytes: number;
 }
 
+/**
+ * The one entry in `ELO_WRITE_ROOT_IDS` that is not an objId.
+ *
+ * `*` removes the folder restriction entirely: anywhere the signed-in person
+ * may write in ELO, they may write through this server. It does not widen
+ * anything else — masks, index fields, file types and sizes stay allowlisted,
+ * and every change still needs a preview and a confirmation.
+ *
+ * Deliberately a word rather than an id, because no id can express it. The
+ * archive root cannot: `refPaths[].path` carries the ancestor chain *without*
+ * the root, so `ELO_WRITE_ROOT_IDS=1` would permit only the archive's top level
+ * and refuse everything inside it — measured, and the opposite of what someone
+ * setting it would expect.
+ */
+export const WRITE_ANYWHERE = '*';
+
 /** Splits a comma-separated env value; blanks are dropped, not kept as "". */
 export function parseList(raw: string | undefined): string[] {
   return (raw ?? '')
@@ -71,6 +87,12 @@ export function assertTargetAllowed(target: EloSord, policy: WritePolicy): void 
   if (policy.rootIds.length === 0) {
     throw new WritePolicyError('No write target roots are configured, so nothing may be written.');
   }
+  // `*` hands this one decision to ELO. That is defensible because the write
+  // runs on the person's own IX session, so their permissions are the boundary
+  // — but it is the only server-side say over *where*, so the server says so
+  // loudly at boot rather than letting it pass unnoticed.
+  if (policy.rootIds.includes(WRITE_ANYWHERE)) return;
+
   const permitted = policy.rootIds.some((root) => isInsideFolder(target, root));
   if (!permitted) {
     throw new WritePolicyError(

@@ -52,7 +52,7 @@ import {
   nextStepsForWhoAmI,
 } from './mcp/nextSteps.js';
 import { requireEloUser } from './write/guard.js';
-import { parseList, parseMimeTypes, type WritePolicy } from './write/policy.js';
+import { parseList, parseMimeTypes, WRITE_ANYWHERE, type WritePolicy } from './write/policy.js';
 import { startPreflightSweep } from './write/preflight.js';
 import { startIdempotencySweep } from './write/idempotency.js';
 import {
@@ -817,10 +817,22 @@ async function startHttp() {
     if (cfg.ELO_WRITE_ENABLED) {
       startPreflightSweep();
       startIdempotencySweep();
-      logger.warn(
-        { roots: parseList(cfg.ELO_WRITE_ROOT_IDS), masks: parseList(cfg.ELO_WRITE_MASKS) },
-        'Write tools are ENABLED — signed-in users may create and change objects in these areas',
-      );
+      const roots = parseList(cfg.ELO_WRITE_ROOT_IDS);
+      const masks = parseList(cfg.ELO_WRITE_MASKS);
+      if (roots.includes(WRITE_ANYWHERE)) {
+        // Worth its own line, at warn level, every boot. This is the one
+        // allowlist that says *where*, and it has been switched off.
+        logger.warn(
+          { masks, otherRootsIgnored: roots.filter((r) => r !== WRITE_ANYWHERE) },
+          'Write tools are ENABLED with NO folder restriction (ELO_WRITE_ROOT_IDS=*) — ' +
+            'a signed-in user may write anywhere their own ELO permissions allow',
+        );
+      } else {
+        logger.warn(
+          { roots, masks },
+          'Write tools are ENABLED — signed-in users may create and change objects in these areas',
+        );
+      }
     }
   }
 

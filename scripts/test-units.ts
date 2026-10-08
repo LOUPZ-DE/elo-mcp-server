@@ -54,6 +54,7 @@ import {
   assertFieldsAllowed,
   assertFileAllowed,
   parseMimeTypes,
+  WRITE_ANYWHERE,
 } from '../src/write/policy.js';
 import { READABLE_FORMATS, READABLE_MIME_TYPES } from '../src/extract/formats.js';
 import { onceOnly, resetIdempotency } from '../src/write/idempotency.js';
@@ -1609,6 +1610,36 @@ test('the sandbox PARENT is not permitted', () => {
 });
 
 test('an empty root list permits nothing', () => {
+  assert.throws(
+    () => assertTargetAllowed(sordAt('567085', ['1']), { ...policy, rootIds: [] }),
+    /nothing may be written/i,
+  );
+});
+
+test('a root list of "*" permits any target the account can read', () => {
+  const anywhere = { ...policy, rootIds: [WRITE_ANYWHERE] };
+  // 548303 is a real production area, refused under a normal root list.
+  assert.doesNotThrow(() => assertTargetAllowed(sordAt('548303', ['1']), anywhere));
+  assert.doesNotThrow(() => assertTargetAllowed(sordAt('9999', []), anywhere));
+});
+
+test('"*" opens the folder boundary and nothing else', () => {
+  const anywhere = { ...policy, rootIds: [WRITE_ANYWHERE] };
+  // The point of the sentinel is that it is narrow: masks, index fields, file
+  // types and sizes stay exactly as restricted as before.
+  assert.throws(() => assertMaskAllowed('Rechnung', anywhere), /not permitted/i);
+  assert.throws(() => assertFieldsAllowed({ SOL_TYPE: 'x' }, anywhere), /may not be written/i);
+  assert.throws(
+    () => assertFileAllowed('image/png', 'bild.png', 100, anywhere),
+    /may not be uploaded/i,
+  );
+  assert.throws(
+    () => assertFileAllowed('application/pdf', 'x.pdf', 5000, anywhere),
+    /the limit is/i,
+  );
+});
+
+test('an empty root list still permits nothing — "*" has to be asked for', () => {
   assert.throws(
     () => assertTargetAllowed(sordAt('567085', ['1']), { ...policy, rootIds: [] }),
     /nothing may be written/i,

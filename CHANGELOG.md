@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`ELO_WRITE_ROOT_IDS=*`** — write anywhere the signed-in person’s own ELO
+  permissions allow, with no folder allowlist. For a pilot group that needs the
+  whole structure they can already see, enumerating top-level folders is a list
+  that goes stale; this says what is meant.
+
+  It exists as a word rather than an id because no id can express it. The
+  obvious guess, the archive root, does the opposite of what it looks like:
+  `refPaths[].path` carries the ancestor chain **without** the root, so
+  `ELO_WRITE_ROOT_IDS=1` permits the archive’s top level and refuses everything
+  inside it. Measured on the live instance before building this.
+
+  It opens the folder boundary and nothing else — masks, index fields, file
+  types and sizes stay allowlisted, writing still needs a personal OAuth
+  sign-in, and every change still takes a preview and a confirmation. Because
+  it removes the only server-side say over *where*, the server logs a warning
+  naming it on every boot.
 - **The version workflow is now something a client can find** (#17). Listing and
   reading versions shipped in `263b898`, but nothing in `tools/list` said so —
   the fullest description of it sat in a TypeScript comment, where no client
