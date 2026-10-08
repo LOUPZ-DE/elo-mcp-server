@@ -21,6 +21,12 @@ usable error message (see `BUGFIXES.md` #21).
 Signing the user in directly sidesteps the whole problem. They authenticate to
 IX themselves, so their session simply *is* their permissions.
 
+**And it is the only way to write.** Since the write tools arrived, a personal
+sign-in is not just the better permission model but the precondition: writing
+refuses any caller without one, and never falls back to the technical account.
+With `MCP_AUTH_MODE=shared` the server cannot be given write tools at all —
+`loadConfig` refuses to start. See [writing.md](./writing.md).
+
 ## What happens when someone connects
 
 ```

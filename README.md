@@ -1,16 +1,18 @@
 # ELO MCP Server
 
 [![License: CC BY-NC 4.0](https://img.shields.io/badge/License-CC%20BY--NC%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc/4.0/)
-[![Node.js](https://img.shields.io/badge/node-%E2%89%A520-339933.svg?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![Node.js](https://img.shields.io/badge/node-%E2%89%A522-339933.svg?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178C6.svg?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![MCP](https://img.shields.io/badge/MCP-Streamable%20HTTP%20%2B%20stdio-7C3AED.svg)](https://modelcontextprotocol.io/)
 [![Docker](https://img.shields.io/badge/Docker-ready-2496ED.svg?logo=docker&logoColor=white)](Dockerfile)
 
-A [Model Context Protocol](https://modelcontextprotocol.io/) server providing
-**read-only** access to the [ELO Digital Office](https://www.elo.com/) document
-management system. Exposes search, metadata, document links, and project-folder
-lookups as tools that LLM agents (Claude Desktop, Claude Code, claude.ai
-Custom Connectors, Notion AI, Open WebUI, n8n, Make, …) can call.
+A [Model Context Protocol](https://modelcontextprotocol.io/) server for the
+[ELO Digital Office](https://www.elo.com/) document management system. Seven
+read tools — search, folder listing, text extraction, metadata and version
+history, links, identity — and four write operations that are **off by default**
+and, once switched on, run only for someone signed in with their own ELO
+account. Usable from Claude Desktop, Claude Code, claude.ai Custom Connectors,
+Notion AI, Open WebUI, n8n, Make and anything else that speaks MCP.
 
 ## Tools
 
@@ -46,8 +48,13 @@ are present:
   accepts only that token plus an idempotency key.
 
 Target folders, masks, index fields, file types and sizes are server-side
-allowlists. Nothing deletes, moves, re-permissions or switches a mask. Details,
-limits and rollback: [docs/writing.md](docs/writing.md).
+allowlists. `ELO_WRITE_ROOT_IDS` names the areas that may be written to — or
+`*`, which drops the folder limit and leaves the signed-in person’s own ELO
+permissions as the boundary, announced in a warning on every boot.
+
+Nothing deletes, moves, re-permissions or switches a mask: those are absent from
+the code, not disabled by configuration. Details, limits and rollback:
+[docs/writing.md](docs/writing.md).
 
 ### Two search engines, one trade-off worth knowing
 
@@ -102,6 +109,10 @@ See [`.env.example`](.env.example) for the complete list with comments.
 | `MCP_AUTH_MODE` | `shared` (default), `oauth` or `both`. See [OAuth 2.1 + DCR](docs/oauth-dcr.md) |
 | `PUBLIC_BASE_URL`, `OAUTH_TOKEN_SECRET`, `OAUTH_SESSION_SECRET` | Required when OAuth is enabled |
 | `STATE_FILE`, `STATE_ENCRYPTION_KEY` | Encrypted persistence, so a redeploy does not strand connected clients. Strongly recommended with OAuth |
+| `ELO_WRITE_ENABLED` | `true` registers the write tools. Default `false` — nothing is written and nothing is advertised |
+| `ELO_WRITE_ROOT_IDS` | objIds that may be written to, or `*` for "anywhere the signed-in user may". Required when writing is on |
+| `ELO_WRITE_MASKS` / `ELO_WRITE_FIELDS` / `ELO_WRITE_MIME_TYPES` | Allowlists for masks, index fields and upload types. `readable` expands to every type the read tools can open |
+| `ELO_WRITE_MAX_BYTES` / `ELO_WRITE_PREFLIGHT_TTL` | Upload cap (defaults to `ELO_MAX_DOCUMENT_BYTES`) and how long a confirmation stays valid (300 s) |
 | `LOG_LEVEL` | pino level, default `info` |
 
 ## Local testing with the MCP Inspector
@@ -127,7 +138,7 @@ it mirrors the workflow the tool descriptions steer the model towards:
 ### Automated tests
 
 ```powershell
-npm run test:unit    # offline; link building, paths, ranking, URL resolution, extraction, OAuth primitives
+npm run test:unit    # offline; links, paths, ranking, extraction, OAuth primitives, write policy, versions
 npm run test:http    # spawns the HTTP transport; auth, tools/list, SSE regression
 npm run test:oauth   # offline; the whole OAuth + DCR flow against a stub IX server
 npm run test:live    # end-to-end against your real ELO instance (read-only)
@@ -161,7 +172,9 @@ Edit `%APPDATA%\Claude\claude_desktop_config.json`:
 }
 ```
 
-Restart Claude Desktop. The seven `elo_*` tools must appear in the tool list.
+Restart Claude Desktop. The seven read tools must appear in the tool list.
+Writing is not available over stdio: it requires a personal OAuth sign-in, which
+is a browser flow and therefore an HTTP-transport feature.
 
 ## Client integrations
 
@@ -216,9 +229,10 @@ containing the MCP message.
   uses `crypto.timingSafeEqual` to avoid timing leaks, but is only as
   strong as the secret itself — use ≥32 random bytes.
 - Rotate `MCP_SHARED_SECRET` if it's exposed anywhere (logs, tickets, …).
-- The server is read-only — no write tools are registered. A leaked token
-  grants read access to your ELO contents through the configured technical
-  user, nothing more.
+- **A shared-secret token buys reading, and only reading.** The write tools
+  refuse any caller without a personal ELO sign-in, with no fallback to the
+  technical account — so a leaked `MCP_SHARED_SECRET` grants read access through
+  that account and nothing more, even with `ELO_WRITE_ENABLED=true`.
 - That last point is the argument for [OAuth](docs/oauth-dcr.md): with
   `MCP_AUTH_MODE=both`, users who sign in with their own ELO account are
   scoped to their own ELO permissions, and a leaked token of theirs exposes
@@ -228,9 +242,12 @@ containing the MCP message.
 
 ## Architecture and operational notes
 
-- **MVP is read-only.** No write operations (`createSord`, `checkinSord`,
-  `checkinDocBegin`, …) are exposed. Do not add them without a separate
-  review.
+- **Writing is opt-in and narrow.** With `ELO_WRITE_ENABLED` unset, no write
+  tool is registered and no IX write method is reachable. Switched on, it covers
+  four operations — create a folder, file a document, check in a version, change
+  allowlisted index fields — each behind a preview and a confirmation, and each
+  requiring a personal OAuth sign-in. `createSord`/`checkinSord`/`checkinDoc*`
+  are reachable only through those four; there is no generic IX passthrough.
 - **Credentials never leave the process.** `.env` is git-ignored; logs are
   configured with pino redaction for `userPwd`, `Cookie`, `Authorization`.
 - **Download URLs are not shareable.** The `downloadUrl` from
@@ -272,7 +289,6 @@ talking to ELO IX REST — and how they were resolved — see
   or a downstream system without an ELO session. Deliberately not built —
   it would expose archive documents on a URL that anyone holding the link can
   open, which is a decision for the archive owner rather than a default.
-
 - Beyond the write MVP: deleting, moving, permission and mask changes, workflow
   control. Each needs a rollback story of its own before it is worth having, and
   the MVP deliberately keeps to operations where the previous state survives.

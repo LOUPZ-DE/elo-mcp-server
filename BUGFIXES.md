@@ -692,6 +692,161 @@ green test suite only proves the *sampled* documents avoid the broken path.
 
 ---
 
+## 24. `createSord` hands back `id: -1`, and only one call minds
+
+A template from `createSord` carries **`id: -1`** — returned as a JSON *number*
+even though `Sord.id` is typed as a string everywhere else.
+
+`checkinSord` accepts it happily and allocates a real objId. `checkinDocBegin`
+takes `document.objId` literally and refuses:
+
+```
+[ELOIX:5023] Das Objekt mit der ID document[0].objId=-1 ist nicht vorhanden
+```
+
+So the folder path worked on the first live run and the document path did not,
+from the same template object.
+
+**Fix.** `isUnsavedSord()` treats `''`, `'0'` and `'-1'` alike, and the document
+chain checks in the sord first to obtain a real objId.
+
+**Lesson.** "Not yet saved" has more than one spelling here, and two IX methods
+disagree about which ones they tolerate.
+
+---
+
+## 25. A mask/document mismatch surfaces on the *second* checkin
+
+ELO distinguishes folder masks from document masks and says so plainly:
+
+```
+[ELOIX:2000] Die Maske Ordner kann nicht für Dokumente verwendet werden.
+[DETAILS:Sord.type=258, isDocument=true]
+```
+
+But not when it would help. The **first** checkin stores a document carrying a
+folder mask without complaint; the error appears when a version is added to it,
+which can be days later.
+
+**Lesson.** A write that returns success is not proof the object is well-formed.
+The live write test therefore uses two mask names — `Ordner` for folders,
+`Freie Eingabe` for documents — rather than one that happens to pass step one.
+
+---
+
+## 26. Checking in a document version does not move `XDateIso`
+
+The optimistic conflict check hashed id, change date, name and index fields.
+It could not see a new version: **`XDateIso` stays where it was** when a version
+is checked in. Two versions, one unchanged fingerprint — exactly the case the
+check exists for.
+
+Found by a live test that added a version and asserted the fingerprint moved. It
+did not. No offline suite could have shown this.
+
+**Fix.** The fingerprint folds in the version identity (`id | version | md5`),
+read through `checkoutDoc`. `npm run test:oauth` keeps it honest with a case
+that changes *only* the version and expects the commit to abort.
+
+**Lesson.** When a timestamp is the whole basis of a concurrency check, measure
+what actually moves it.
+
+---
+
+## 27. `checkoutDoc` has no `docVersionZ` — `docId` is the version selector
+
+Three call sites sent `docVersionZ: { bset: '-1' }` for months, believing it
+asked for every version. The instance’s own OpenAPI says otherwise:
+
+```
+BRequest_IXServicePortIF_checkoutDoc: ci, docId, objId, lockZ, editInfoZ
+```
+
+No `docVersionZ`. It was accepted and silently discarded, and `document.docs`
+came back holding the working version alone — which is what sent two rounds of
+investigation looking for a version-history endpoint that does not exist. The
+`DocHistory` schema is defined but referenced by **none** of the 342 paths,
+`checkoutSordHistory` returns `[]` (it covers index, ACL and name changes, not
+version checkins), and the `VersionHistory` plugin is not loaded.
+
+The answer was the parameter already in hand: **`docId: -1` returns the whole
+history**, newest first. Measured — a folder answers with 0 entries, a
+one-version document with 1, a two-version document with 2.
+
+**One trap in the fix.** `editInfoZ` must stay the object form. With the string
+`"sord"` the call succeeds and `docs` comes back **empty**.
+
+**Lesson.** A selector that is accepted is not a selector that is read. When a
+response is missing something, check the request schema before concluding the
+feature is absent.
+
+---
+
+## 28. `docId` is not scoped to `objId`
+
+Asking for one document’s version by id returns whatever that id belongs to:
+
+```
+checkoutDoc(objId: 572450, docId: 385194)
+  → sord.id = 572448, "Protokoll d58bc5", document.objId = 572448
+```
+
+A different document, no error, no warning. Version ids are archive-wide, so
+"version X of document Y" could quietly serve document Z.
+
+**Fix.** Since `docId: -1` hands back the document’s own versions (#27), the
+tool selects from that list and never addresses a foreign id at all. The guard
+that an earlier implementation needed was deleted along with the second call.
+
+**Lesson.** The better fix for "this call can stray" is often a call that cannot.
+
+---
+
+## 29. `DocVersion`: `size` is a string, `version` is empty, `id` is the identity
+
+Three things about the same object, all measured:
+
+- **`size` arrives as `"57"`**, a string, while the JavaDoc says int. Three tools
+  surfaced it straight into a `sizeBytes: number` field. The compiler found all
+  three the moment the type told the truth.
+- **`version` is empty** on this instance for every version of every document —
+  the field whose name promises to be the version number.
+- **`id` is populated** and is what `docId` selects on, so it is the only usable
+  version identifier. Tools report it as `versionId`.
+
+Per-version timestamps exist, but not under the sord’s names: `createDateIso`,
+`updateDateIso`, `accessDateIso`, `tStamp` — not `IDateIso`/`XDateIso`.
+
+**Lesson.** Where a field’s name and its content disagree, the name wins the
+argument in code review and loses it at runtime.
+
+---
+
+## 30. `refPaths[].path` omits the archive root
+
+The write allowlist checks whether a target sits inside a configured area, using
+`isInsideFolder` over id, parentId and the reference paths. The obvious way to
+permit the whole archive is to name its root — and it does close to the
+opposite.
+
+```
+objId 1 = "LOUPZ", type 9999, parentId 1     ← the archive root
+
+"IT-Sicherheit"       refPaths[].path = [108120:IT]
+a document two down    refPaths[].path = [108120:IT, 548303:IT-Sicherheit]
+```
+
+The root never appears in the chain. `ELO_WRITE_ROOT_IDS=1` therefore matches
+only objects whose *direct* parent is the root — the archive’s top level — and
+refuses everything inside it. Backwards, and visible only as "it does not work".
+
+**Fix.** Name the areas themselves, or use the sentinel `*`, which removes the
+folder restriction explicitly and logs a warning at every boot.
+
+**Lesson.** An ancestor chain is not required to start where you would start it.
+
+---
+
 ## Summary of ELO IX gotchas
 
 | Aspect | What we observed |
@@ -716,6 +871,11 @@ green test suite only proves the *sampled* documents avoid the broken path.
 | Impersonation | `login`/`runAsUser` and `loginAdmin`/`reportAsUser` exist in the API but may be refused at runtime with the generic `[ELOIX:3008]`. Probe self-impersonation to separate "not permitted" from "unknown user". |
 | Session identity | `getSessionInfos` lists **all** server sessions, not yours. Read the identity from the login response. |
 | Login errors | `[ELOIX:3008]` covers unknown user, wrong password, locked account **and** refused impersonation. It is not a diagnosis. |
+| Document versions | `checkoutDoc` returns the working version alone unless **`docId: -1`** asks for the history. There is no `docVersionZ`, and no endpoint exposes `DocHistory`. |
+| Version identity | `DocVersion.version` is empty here; `id` carries the identity and is what `docId` selects on. `size` arrives as a string. Dates are `createDateIso`/`updateDateIso`. |
+| Cross-object ids | `docId` is archive-wide and **not** scoped to `objId` — IX answers about the other document without error. |
+| Ancestor chains | `refPaths[].path` lists ancestors **without** the archive root, so no id matches "anywhere in the archive". |
+| Write-side quirks | `createSord` yields `id: -1` (a number); a folder mask on a document is refused only at the *second* checkin; a version checkin leaves `XDateIso` untouched. |
 
 ---
 

@@ -24,6 +24,11 @@ this Open WebUI instance acts as the same technical ELO account, and that tool
 says so plainly. It is the quickest way to check whether results are scoped the
 way you assumed.
 
+The same fact decides what this path can do: **the shared secret is read-only**.
+If the server has writing enabled, its tools still refuse a caller who has not
+signed in with their own ELO account, and Open WebUI’s MCP client does not do
+that sign-in. Nothing here can change the archive.
+
 ## Verify
 
 ```powershell

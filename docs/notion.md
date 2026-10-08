@@ -216,8 +216,10 @@ Just as important as for the other integration paths:
 - **Notion Integration Token** (path C) holds write rights in Notion —
   ≥32 random bytes, store it in n8n's credential manager, do not check it
   into workflow definitions.
-- The MCP server is **read-only** in ELO — even a leaked token cannot mutate
-  ELO data. Damage containment is baked in.
+- **A leaked bearer token cannot change anything in ELO.** The write tools, when
+  they are enabled at all, refuse any caller without a personal ELO sign-in and
+  never fall back to the technical account — so the shared secret stays a
+  read-only credential by construction. See [writing.md](./writing.md).
 
 ## Troubleshooting
 
