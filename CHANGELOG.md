@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **One log line per document read**, saying where the time went:
+  `checkoutMs`, `downloadMs`, `extractMs`, `totalMs`, `bytes`, `pageCount`,
+  `totalChars`, and `slotWaitMs` for the time spent queueing behind
+  `ELO_CONTENT_CONCURRENCY`. A read that fails logs `failedIn` with the phase it
+  stopped in. The line carries the request's `reqId`; it never carries the
+  document's name or text.
+
+  Prompted by a 62 MB catalogue on dev: the request log gave one duration per
+  call, and the container graphs average over an interval too coarse to tell a
+  slow download from a slow parser — two readings that need opposite fixes
+  (raise the timeout vs. split the file).
+- **`tool` on every `tools/call` request line** — the tool's name, never its
+  arguments. Two parallel calls could not be told apart before.
 - **`ELO_WRITE_ROOT_IDS=*`** — write anywhere the signed-in person’s own ELO
   permissions allow, with no folder allowlist. For a pilot group that needs the
   whole structure they can already see, enumerating top-level folders is a list

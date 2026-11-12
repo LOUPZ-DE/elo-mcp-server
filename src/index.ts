@@ -5,6 +5,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import express, { type Request, type Response, type NextFunction } from 'express';
 import { loadConfig } from './utils/config.js';
 import { logger } from './utils/logger.js';
+import type { Logger } from 'pino';
 import { EloClient } from './elo/client.js';
 import { eloSearch, SearchInputSchema } from './tools/elo_search.js';
 import { eloGetMetadata, GetMetadataInputSchema } from './tools/elo_get_metadata.js';
@@ -223,6 +224,7 @@ function summarizeRpc(body: unknown): {
   rpcMethod?: string;
   rpcId?: unknown;
   client?: string;
+  tool?: string;
 } {
   const msg = Array.isArray(body) ? body[0] : body;
   if (!msg || typeof msg !== 'object') return {};
@@ -239,6 +241,11 @@ function summarizeRpc(body: unknown): {
     rpcMethod: typeof m.method === 'string' ? m.method : undefined,
     rpcId: m.id,
     client: typeof clientInfo?.name === 'string' ? clientInfo.name : undefined,
+    // The tool's name only, never its arguments: those carry search terms and
+    // file contents. Without it, two parallel tools/call lines could not be
+    // told apart.
+    tool:
+      m.method === 'tools/call' && typeof params?.name === 'string' ? params.name : undefined,
   };
 }
 
@@ -292,7 +299,10 @@ Working through a question:
   cfg.ELO_WRITE_ENABLED ? WRITE_INSTRUCTIONS : ''
 }`;
 
-function createServer(): McpServer {
+// `log` is the HTTP request's child logger when there is one, so what a tool
+// logs carries the reqId of the request that ran it. stdio has no request and
+// gets the base logger.
+function createServer(log: Logger = logger): McpServer {
   const icon = loadIcon();
   const src = iconSrc(cfg.PUBLIC_BASE_URL);
   const server = new McpServer(
@@ -417,9 +427,16 @@ function createServer(): McpServer {
       },
       async (args, extra) => {
         try {
-          const result = await withContentSlot(() =>
-            withEloClient(extra.authInfo, (c) => eloGetDocumentContent(c, args, contentOptions)),
-          );
+          // Time spent queueing for a slot is logged beside the read itself:
+          // with ELO_CONTENT_CONCURRENCY=1 a second parallel call can take
+          // twice as long while doing exactly the same work.
+          const queuedAt = performance.now();
+          const result = await withContentSlot(() => {
+            const slotWaitMs = Math.round(performance.now() - queuedAt);
+            return withEloClient(extra.authInfo, (c) =>
+              eloGetDocumentContent(c, args, { ...contentOptions, log: log.child({ slotWaitMs }) }),
+            );
+          });
           return respond(result, nextStepsForDocumentContent(result));
         } catch (err) {
           return asError(err);
@@ -888,7 +905,7 @@ async function startHttp() {
       );
     };
 
-    const server = createServer();
+    const server = createServer(reqLog);
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
       enableJsonResponse: true,

@@ -46,7 +46,13 @@ import {
 import type { SordView } from '../src/elo/sord.js';
 import { requireEloUser } from '../src/write/guard.js';
 import { toDocVersionView, versionIdOf, versionSizeBytes } from '../src/elo/docVersion.js';
-import { resolveVersion, DocumentContentError } from '../src/tools/elo_get_document_content.js';
+import {
+  resolveVersion,
+  DocumentContentError,
+  eloGetDocumentContent,
+} from '../src/tools/elo_get_document_content.js';
+import type { EloClient } from '../src/elo/client.js';
+import pino, { type Logger } from 'pino';
 import { hashPayload, prepareWrite, consumeWrite, resetPreflight } from '../src/write/preflight.js';
 import {
   assertTargetAllowed,
@@ -1469,6 +1475,85 @@ test('a version id from another document simply is not in the list', () => {
       // The error names what there is, which the old one could not.
       /385196, 385195/.test((err as Error).message),
   );
+});
+
+section('Document content — the timing line');
+
+/** A pino logger whose lines land in an array instead of on stderr. */
+function capturingLog(): { log: Logger; lines: Record<string, unknown>[] } {
+  const lines: Record<string, unknown>[] = [];
+  const log = pino({ level: 'info' }, { write: (line: string) => void lines.push(JSON.parse(line)) });
+  return { log, lines };
+}
+
+const SECRET_NAME = 'Gehaltsliste Vertraulich';
+const SECRET_TEXT = 'Kontostand 4711 Euro';
+
+/** checkoutDoc as IX answers it for a one-version document. */
+function checkoutOf(doc: Record<string, unknown>) {
+  return {
+    result: {
+      sord: { id: '548900', name: SECRET_NAME, type: 254, parentId: 548303 },
+      document: { docs: [{ id: 385200, contentType: 'text/plain', ext: 'txt', ...doc }] },
+    },
+  };
+}
+
+const readOptions = {
+  webclientBaseUrl: 'https://elo.example.com',
+  maxBytes: 1024 * 1024,
+  maxChars: 50_000,
+  timeoutMs: 60_000,
+};
+
+test('a read logs sizes and durations, and nothing of the document itself', async () => {
+  const { log, lines } = capturingLog();
+  const client = {
+    request: async () => checkoutOf({ fileData: { data: Buffer.from(SECRET_TEXT).toString('base64') } }),
+  } as unknown as EloClient;
+
+  await eloGetDocumentContent(client, { objId: '548900' }, { ...readOptions, log });
+
+  assert.equal(lines.length, 1);
+  const line = lines[0]!;
+  assert.equal(line.msg, 'Document content read');
+  assert.equal(line.objId, '548900');
+  assert.equal(line.bytes, Buffer.byteLength(SECRET_TEXT));
+  assert.equal(line.totalChars, SECRET_TEXT.length);
+  assert.equal(line.contentSource, 'inline');
+  for (const field of ['checkoutMs', 'downloadMs', 'extractMs', 'totalMs']) {
+    assert.equal(typeof line[field], 'number', `${field} missing`);
+  }
+  // A log is read by more people, and kept longer, than the document's own ACL
+  // would allow. Sizes and timings are what was asked for; nothing else.
+  const raw = JSON.stringify(line);
+  assert.ok(!raw.includes('Gehaltsliste'), 'document name leaked into the log');
+  assert.ok(!raw.includes('Kontostand'), 'document text leaked into the log');
+});
+
+test('a read that fails says in which phase, and how long it ran', async () => {
+  const { log, lines } = capturingLog();
+  const client = {
+    request: async () => checkoutOf({ url: 'https://elo.example.com/ix/stream/385200' }),
+    download: async () => {
+      throw new Error('timeout of 60000ms exceeded');
+    },
+  } as unknown as EloClient;
+
+  await assert.rejects(
+    eloGetDocumentContent(client, { objId: '548900' }, { ...readOptions, log }),
+    /timeout/,
+  );
+
+  assert.equal(lines.length, 1);
+  const line = lines[0]!;
+  assert.equal(line.msg, 'Document content not read');
+  // "download" rather than "extract" is the whole point: a timeout and a parser
+  // running out of memory look the same from the request log.
+  assert.equal(line.failedIn, 'download');
+  assert.equal(typeof line.checkoutMs, 'number');
+  assert.equal(line.downloadMs, undefined);
+  assert.equal(typeof line.totalMs, 'number');
 });
 
 section('Write — the identity gate');

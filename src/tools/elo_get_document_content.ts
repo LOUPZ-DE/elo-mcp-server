@@ -4,6 +4,7 @@ import { LOCK_Z_NO, EDIT_INFO_Z_ALL, DOC_ID_ALL_VERSIONS, isFolder } from '../el
 import { buildEloLink, parentIdOf, refPathString } from '../elo/sord.js';
 import { extractText } from '../extract/index.js';
 import { logger } from '../utils/logger.js';
+import type { Logger } from 'pino';
 import type { CheckoutResponse, EloDocVersion, EloSord } from '../elo/types.js';
 import { versionIdOf, versionSizeBytes } from '../elo/docVersion.js';
 
@@ -70,6 +71,26 @@ export interface GetDocumentContentOptions {
   maxBytes: number;
   maxChars: number;
   timeoutMs: number;
+  /**
+   * Where the one line per read goes. The HTTP transport passes its request
+   * logger, so the line carries the reqId it belongs to; defaults to the
+   * module logger.
+   */
+  log?: Logger;
+}
+
+/**
+ * Where a read spent its time. Filled in phase by phase, so a read that fails
+ * still says how far it got — a download timeout and a parser that runs out of
+ * memory look identical from the outside, and need opposite fixes.
+ */
+interface ReadTrace {
+  /** The phase in progress; after a failure, the one that failed. */
+  phase: 'checkout' | 'download' | 'extract' | 'done';
+  checkoutMs?: number;
+  downloadMs?: number;
+  extractMs?: number;
+  bytes?: number;
 }
 
 /** Raised for conditions the model should act on rather than retry. */
@@ -82,12 +103,74 @@ export class DocumentContentError extends Error {
   }
 }
 
+/**
+ * Read a document's text, and log one line saying where the time went.
+ *
+ * The line exists because a large document was a guess without it: the HTTP
+ * log gave one duration per request, and the container graphs average over an
+ * interval too coarse to tell a slow download from a slow parser. It carries
+ * sizes, durations and page counts — never the name or a word of the content.
+ */
 export async function eloGetDocumentContent(
   client: EloClient,
   args: GetDocumentContentArgs,
   options: GetDocumentContentOptions,
 ): Promise<DocumentContent> {
+  const log = options.log ?? logger;
+  const started = performance.now();
+  const trace: ReadTrace = { phase: 'checkout' };
+
+  try {
+    const result = await readDocumentContent(client, args, options, trace);
+    const { phase: _done, ...timings } = trace;
+    log.info(
+      {
+        objId: result.objId,
+        ...timings,
+        totalMs: Math.round(performance.now() - started),
+        contentSource: result.contentSource,
+        extractor: result.extractor,
+        pageCount: result.pageCount,
+        textLayer: result.textLayer,
+        totalChars: result.totalCharCount,
+        offset: result.offset,
+      },
+      'Document content read',
+    );
+    return result;
+  } catch (err) {
+    const { phase, ...timings } = trace;
+    // The reason itself is logged by the tool's error handler; this line adds
+    // what that one cannot know — the phase and how long it ran.
+    log.warn(
+      {
+        objId: args.objId,
+        failedIn: phase,
+        ...timings,
+        totalMs: Math.round(performance.now() - started),
+      },
+      'Document content not read',
+    );
+    throw err;
+  }
+}
+
+async function readDocumentContent(
+  client: EloClient,
+  args: GetDocumentContentArgs,
+  options: GetDocumentContentOptions,
+  trace: ReadTrace,
+): Promise<DocumentContent> {
+  let mark = performance.now();
+  const lap = (): number => {
+    const now = performance.now();
+    const elapsed = Math.round(now - mark);
+    mark = now;
+    return elapsed;
+  };
+
   const checkout = await checkoutDoc(client, args.objId);
+  trace.checkoutMs = lap();
   const sord = checkout.result?.sord;
   if (!sord) {
     throw new DocumentContentError(`No object with objId=${args.objId} found.`);
@@ -113,6 +196,7 @@ export async function eloGetDocumentContent(
   const doc = resolveVersion(args.version, docs, sord.name, eloLink);
 
   // --- acquire bytes -------------------------------------------------------
+  trace.phase = 'download';
   let bytes: Buffer;
   let contentSource: DocumentContent['contentSource'];
   let fileName: string | undefined;
@@ -134,14 +218,19 @@ export async function eloGetDocumentContent(
     fileName = download.fileName;
     contentSource = 'stream';
   }
+  trace.downloadMs = lap();
+  trace.bytes = bytes.length;
 
   // --- extract -------------------------------------------------------------
+  trace.phase = 'extract';
   const extracted = await extractText({
     data: bytes,
     contentType: doc.contentType,
     ext: doc.ext,
     fileName,
   });
+  trace.extractMs = lap();
+  trace.phase = 'done';
 
   // --- page ----------------------------------------------------------------
   const limit = Math.min(args.maxChars ?? options.maxChars, options.maxChars);
