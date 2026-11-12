@@ -181,6 +181,7 @@ const contentOptions = {
   maxBytes: cfg.ELO_MAX_DOCUMENT_BYTES,
   maxChars: cfg.ELO_MAX_TEXT_CHARS,
   timeoutMs: cfg.ELO_DOWNLOAD_TIMEOUT_MS,
+  extractTimeoutMs: cfg.ELO_EXTRACT_TIMEOUT_MS,
 };
 
 // Allowlists for the write MVP. Empty lists permit nothing; loadConfig()

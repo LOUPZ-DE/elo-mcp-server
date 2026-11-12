@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { EloClient, EloContentTooLargeError, EloStaleStreamError } from '../elo/client.js';
 import { LOCK_Z_NO, EDIT_INFO_Z_ALL, DOC_ID_ALL_VERSIONS, isFolder } from '../elo/constants.js';
 import { buildEloLink, parentIdOf, refPathString } from '../elo/sord.js';
-import { extractText } from '../extract/index.js';
+import { extractTextIsolated } from '../extract/isolated.js';
 import { logger } from '../utils/logger.js';
 import type { Logger } from 'pino';
 import type { CheckoutResponse, EloDocVersion, EloSord } from '../elo/types.js';
@@ -71,6 +71,8 @@ export interface GetDocumentContentOptions {
   maxBytes: number;
   maxChars: number;
   timeoutMs: number;
+  /** How long the parser may run in its worker. Defaults to 60 s. */
+  extractTimeoutMs?: number;
   /**
    * Where the one line per read goes. The HTTP transport passes its request
    * logger, so the line carries the reqId it belongs to; defaults to the
@@ -219,16 +221,18 @@ async function readDocumentContent(
     contentSource = 'stream';
   }
   trace.downloadMs = lap();
-  trace.bytes = bytes.length;
+  // Read before extracting: the worker takes the bytes over, and `bytes` is
+  // empty afterwards.
+  const byteLength = bytes.length;
+  trace.bytes = byteLength;
 
   // --- extract -------------------------------------------------------------
+  // In a worker thread, so a large PDF does not stop every other request.
   trace.phase = 'extract';
-  const extracted = await extractText({
-    data: bytes,
-    contentType: doc.contentType,
-    ext: doc.ext,
-    fileName,
-  });
+  const extracted = await extractTextIsolated(
+    { data: bytes, contentType: doc.contentType, ext: doc.ext, fileName },
+    options.extractTimeoutMs,
+  );
   trace.extractMs = lap();
   trace.phase = 'done';
 
@@ -247,7 +251,7 @@ async function readDocumentContent(
     parentId: parentIdOf(sord),
     contentType: doc.contentType,
     fileExtension: doc.ext,
-    sizeBytes: versionSizeBytes(doc) ?? bytes.length,
+    sizeBytes: versionSizeBytes(doc) ?? byteLength,
     versionId: versionIdOf(doc),
     ...(doc.version ? { version: doc.version } : {}),
     isWorkingVersion: doc.workVersion,

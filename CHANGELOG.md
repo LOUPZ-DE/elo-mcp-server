@@ -7,7 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **A large PDF no longer stops the server for everyone else.** Text extraction
+  ran on the thread that serves every request; the 747-page BKI catalogue held
+  it for 17 s on dev, and every other user's call waited that long. Each
+  extraction now runs in its own worker thread — measured locally, the longest
+  stall for another client fell from 1.3 s to 0.03 s on a 750-page PDF. A
+  worker costs about 30 ms. See `BUGFIXES.md` #31.
+
 ### Added
+- **`ELO_EXTRACT_TIMEOUT_MS`** (default 60 s): how long a parse may run before
+  its worker is stopped. Possible only now — an in-process parse could be
+  abandoned but not interrupted. Deliberately no heap limit: measured, a worker
+  limit crossed during one large allocation aborts the whole process
+  (`BUGFIXES.md` #31).
 - **One log line per document read**, saying where the time went:
   `checkoutMs`, `downloadMs`, `extractMs`, `totalMs`, `bytes`, `pageCount`,
   `totalChars`, and `slotWaitMs` for the time spent queueing behind

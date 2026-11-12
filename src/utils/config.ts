@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { logger } from './logger.js';
 import { decodeStateKey, secretsMatch } from './stateFile.js';
 import { parseList } from '../write/policy.js';
+import { DEFAULT_EXTRACT_TIMEOUT_MS } from '../extract/isolated.js';
 
 const ConfigSchema = z.object({
   ELO_BASE_URL: z.string().url(),
@@ -44,9 +45,14 @@ const ConfigSchema = z.object({
   // Reverse proxies typically cut a request at 60 s; a longer timeout here just
   // turns into a 504 the client cannot interpret. Raise both together.
   ELO_DOWNLOAD_TIMEOUT_MS: z.coerce.number().int().positive().default(60_000),
+  // How long text extraction may run, in its own worker thread, before it is
+  // stopped. Counted separately from the download: the 747-page BKI catalogue
+  // took 9 s to download and 17 s to parse on the server.
+  ELO_EXTRACT_TIMEOUT_MS: z.coerce.number().int().positive().default(DEFAULT_EXTRACT_TIMEOUT_MS),
   // Download + parse holds the whole file in memory. Three concurrent 15 MB
   // PDFs will OOM a small container, and the HTTP transport has no backpressure
-  // of its own.
+  // of its own. Parses run in worker threads, so this is also how many CPU
+  // cores large documents may occupy at once.
   ELO_CONTENT_CONCURRENCY: z.coerce.number().int().positive().max(8).default(2),
   // NOTE: not z.coerce.boolean() — that turns the string "false" into true.
   ELO_DOCUMENT_CONTENT_ENABLED: z

@@ -18,7 +18,9 @@ import {
 } from '../src/elo/sord.js';
 import { rankProjectFolders, type ProjectCandidate } from '../src/tools/elo_find_project_folder.js';
 import { resolveStreamUrl, isForeignHost, UnsafeStreamUrlError } from '../src/elo/streamUrl.js';
-import { extractText, normaliseWhitespace } from '../src/extract/index.js';
+import { extractText, normaliseWhitespace, ExtractionFailedError } from '../src/extract/index.js';
+import { extractTextIsolated, ExtractionTimeoutError } from '../src/extract/isolated.js';
+import { deflateSync } from 'node:zlib';
 import { sumPrecise, installSumPrecisePolyfill } from '../src/extract/sumPrecise.js';
 import { extractEml } from '../src/extract/eml.js';
 import { mapMsgFields, rtfToText } from '../src/extract/msg.js';
@@ -1554,6 +1556,120 @@ test('a read that fails says in which phase, and how long it ran', async () => {
   assert.equal(typeof line.checkoutMs, 'number');
   assert.equal(line.downloadMs, undefined);
   assert.equal(typeof line.totalMs, 'number');
+});
+
+section('Extraction — in a worker thread');
+
+/**
+ * A born-digital table PDF: per page 40 rows of five cells, ~2 200 characters,
+ * FlateDecode content — the shape of the BKI cost catalogue, whose parse held
+ * the server's only thread for 17 s.
+ */
+function tablePdf(pages: number): Buffer {
+  const objects: Buffer[] = [];
+  const add = (body: Buffer): number => objects.push(body);
+  const catalog = add(Buffer.alloc(0));
+  const root = add(Buffer.alloc(0));
+  const font = add(Buffer.from('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>'));
+  const kids: number[] = [];
+  for (let p = 0; p < pages; p++) {
+    let ops = 'BT /F1 7 Tf\n';
+    for (let row = 0; row < 40; row++) {
+      const cells = [`${330 + (row % 9)}.${10 + row}`, `Innentuer T30 ${p}-${row}`, `${120 + row} EUR`, `${260 + row} EUR`, `${410 + row} EUR`];
+      cells.forEach((c, i) => (ops += `1 0 0 1 ${40 + i * 105} ${800 - row * 19} Tm (${c}) Tj\n`));
+    }
+    const data = deflateSync(Buffer.from(`${ops}ET\n`, 'latin1'));
+    const content = add(
+      Buffer.concat([Buffer.from(`<< /Length ${data.length} /Filter /FlateDecode >>\nstream\n`), data, Buffer.from('\nendstream')]),
+    );
+    kids.push(
+      add(Buffer.from(`<< /Type /Page /Parent ${root} 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 ${font} 0 R >> >> /Contents ${content} 0 R >>`)),
+    );
+  }
+  objects[catalog - 1] = Buffer.from(`<< /Type /Catalog /Pages ${root} 0 R >>`);
+  objects[root - 1] = Buffer.from(`<< /Type /Pages /Count ${pages} /Kids [${kids.map((k) => `${k} 0 R`).join(' ')}] >>`);
+
+  const parts = [Buffer.from('%PDF-1.7\n')];
+  let offset = parts[0]!.length;
+  const offsets: number[] = [];
+  objects.forEach((body, i) => {
+    const chunk = Buffer.concat([Buffer.from(`${i + 1} 0 obj\n`), body, Buffer.from('\nendobj\n')]);
+    offsets.push(offset);
+    offset += chunk.length;
+    parts.push(chunk);
+  });
+  const xref = offsets.map((o) => `${String(o).padStart(10, '0')} 00000 n \n`).join('');
+  parts.push(
+    Buffer.from(
+      `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n${xref}trailer\n<< /Size ${objects.length + 1} /Root ${catalog} 0 R >>\nstartxref\n${offset}\n%%EOF\n`,
+    ),
+  );
+  return Buffer.concat(parts);
+}
+
+test('the worker returns exactly what the in-process extractor returns', async () => {
+  const input = () => ({ data: Buffer.from('Kostengruppe 344\r\n\r\n\r\nInnentüren   T30'), contentType: 'text/plain' });
+  assert.deepEqual(await extractTextIsolated(input()), await extractText(input()));
+});
+
+test('an extraction error crosses the thread boundary as its own class', async () => {
+  await assert.rejects(
+    extractTextIsolated({ data: Buffer.from('%PDF-1.7\nnothing to see here'), ext: 'pdf' }),
+    (err: unknown) => err instanceof ExtractionFailedError && /PDF could not be parsed/.test((err as Error).message),
+  );
+});
+
+test('a small, pooled Buffer is copied, never moved', async () => {
+  // Small Buffers share one ArrayBuffer with unrelated ones. Moving it to the
+  // worker would detach all of them — data corruption somewhere else entirely.
+  const pooled = Buffer.from('ein kurzer Text');
+  const neighbour = Buffer.from('ein Nachbar im selben Pool');
+  assert.ok(pooled.buffer.byteLength > pooled.byteLength, 'fixture is not pooled');
+  await extractTextIsolated({ data: pooled, contentType: 'text/plain' });
+  assert.equal(pooled.toString(), 'ein kurzer Text');
+  assert.equal(neighbour.toString(), 'ein Nachbar im selben Pool');
+});
+
+test('a downloaded document is moved to the worker, not copied', async () => {
+  // Why the content tool reads the length before extracting.
+  const owned = Buffer.alloc(64 * 1024, 'a');
+  assert.equal(owned.byteLength, owned.buffer.byteLength, 'fixture is pooled');
+  await extractTextIsolated({ data: owned, contentType: 'text/plain' });
+  assert.equal(owned.length, 0);
+});
+
+test('a large PDF no longer stops the main thread while it is parsed', async () => {
+  // In-process, a second request waited 1.3 s of a 1.6 s parse of 750 such
+  // pages. That waiting is what every other user felt as the server hanging.
+  const pdf = tablePdf(400);
+  let last = performance.now();
+  let longestStall = 0;
+  const tick = setInterval(() => {
+    const now = performance.now();
+    longestStall = Math.max(longestStall, now - last);
+    last = now;
+  }, 10);
+  const started = performance.now();
+  try {
+    const result = await extractTextIsolated({ data: pdf, ext: 'pdf' });
+    assert.equal(result.pageCount, 400);
+  } finally {
+    clearInterval(tick);
+  }
+  longestStall = Math.max(longestStall, performance.now() - last);
+  const parseMs = performance.now() - started;
+  assert.ok(parseMs > 300, `parse too fast (${Math.round(parseMs)} ms) to prove anything`);
+  assert.ok(longestStall < 200, `main thread stalled for ${Math.round(longestStall)} ms`);
+});
+
+test('a parse that runs past its time limit is stopped, not waited for', async () => {
+  const started = performance.now();
+  await assert.rejects(
+    extractTextIsolated({ data: tablePdf(400), ext: 'pdf' }, 50),
+    (err: unknown) => err instanceof ExtractionTimeoutError && /longer than/.test((err as Error).message),
+  );
+  // An in-process parse could only be abandoned, and would have run on.
+  assert.ok(performance.now() - started < 1000);
 });
 
 section('Write — the identity gate');

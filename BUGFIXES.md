@@ -847,6 +847,54 @@ folder restriction explicitly and logs a warning at every boot.
 
 ---
 
+## 31. One large PDF stopped the server for everyone
+
+Not an IX quirk, but it surfaced the same way: through measurement, not through
+an error. A colleague needed the 62 MB BKI catalogue, 747 pages. On dev, with
+the size limit raised, one read took 26.5 s: 0.6 s checkout, 9.1 s download,
+**16.8 s parse**.
+
+The parse ran on the thread that serves every request. Reproduced locally with
+a generated table PDF of the same shape, while a second client sent small HTTP
+requests:
+
+| PDF | Parse | Longest wait of the other client |
+|---|---|---|
+| 750 pages, in-process | 1.6 s | 1.3 s |
+| 3 000 pages, in-process | 7.7 s | 6.5 s |
+| 750 pages, worker thread | 1.6 s | 0.03 s |
+
+So for those 17 s on the server, every other user's search, listing and
+`tools/list` stood still. `ELO_CONTENT_CONCURRENCY` does not touch this — it
+decides how many parses *queue*, not whether one blocks.
+
+**Fix.** Every extraction runs in its own worker thread (`src/extract/isolated.ts`).
+The bytes are moved, not copied; a small pooled Buffer is copied first, because
+moving the pool would detach unrelated Buffers. A worker costs about 30 ms. It
+also allows a time limit that really stops a parse (`ELO_EXTRACT_TIMEOUT_MS`,
+60 s) — `terminate()` interrupts running JavaScript, which nothing in-process can.
+
+**The heap limit that was not added.** `resourceLimits` looked like the obvious
+companion, since container memory is unlimited. Measured on the 3 000-page PDF,
+which needs roughly 150–190 MB:
+
+```
+ 32 / 64 / 96 MB   worker ends cleanly with ERR_WORKER_OUT_OF_MEMORY
+       128 MB      FATAL ERROR: Reached heap limit — the whole process aborts
+192 MB and up      ok
+```
+
+Node grants a worker at its limit about 16 MB to wind down. A limit crossed in
+the middle of one large allocation — joining or normalising millions of
+characters — goes straight through that, and takes the server with it. Without
+`resourceLimits` a worker gets the main thread's own heap limit, so memory
+behaves exactly as before. A ceiling that can be relied on needs a child process.
+
+**Lesson.** A safety net is only one if it holds at the edge. Test the limit
+just below the real need, not far below it.
+
+---
+
 ## Summary of ELO IX gotchas
 
 | Aspect | What we observed |
