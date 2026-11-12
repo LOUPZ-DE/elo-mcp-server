@@ -103,6 +103,7 @@ See [`.env.example`](.env.example) for the complete list with comments.
 | `ELO_MAX_DOCUMENT_BYTES` / `ELO_MAX_TEXT_CHARS` | Download and extracted-text caps. Defaults 15 MB / 50 000 characters |
 | `ELO_DOWNLOAD_TIMEOUT_MS` / `ELO_CONTENT_CONCURRENCY` | Download timeout and parallelism. Defaults 60 s / 2 |
 | `ELO_EXTRACT_TIMEOUT_MS` | How long text extraction may run in its worker thread before it is stopped. Default 60 s |
+| `ELO_CONTENT_CACHE_TTL` / `ELO_CONTENT_CACHE_MAX_CHARS` | How long extracted text stays cached after its last read, and the budget across all documents. Defaults 600 s / 20 million characters; TTL `0` turns it off |
 | `ELO_LANGUAGE` / `ELO_COUNTRY` / `ELO_TIMEZONE` | ClientInfo defaults |
 | `MCP_TRANSPORT` | `stdio` (default) or `http` |
 | `MCP_HTTP_HOST` / `MCP_HTTP_PORT` | HTTP transport bind address (default `0.0.0.0:3000`) |

@@ -53,11 +53,16 @@ const WORKER_URL = new URL(
  * Takes ownership of `input.data` when the Buffer owns its memory: the bytes
  * are moved to the worker, not copied, and the caller's Buffer is empty
  * afterwards. Read anything you need from it — its length, say — beforehand.
+ *
+ * `signal` stops the parse the same way the time limit does: when the client
+ * has given up, the worker is terminated and the core is free again.
  */
 export function extractTextIsolated(
   input: ExtractInput,
   timeoutMs: number = DEFAULT_EXTRACT_TIMEOUT_MS,
+  signal?: AbortSignal,
 ): Promise<ExtractResult> {
+  if (signal?.aborted) return Promise.reject(signal.reason);
   const { data, ...rest } = input;
   // A downloaded document owns its ArrayBuffer and is moved as is. Small
   // Buffers are slices of a pool shared with unrelated Buffers; moving that
@@ -76,10 +81,13 @@ export function extractTextIsolated(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      signal?.removeEventListener('abort', abandon);
       outcome();
       // Whatever happened, the worker and its heap go now.
       void worker.terminate();
     };
+    const abandon = (): void => settle(() => reject(signal!.reason));
+    signal?.addEventListener('abort', abandon, { once: true });
 
     const timer = setTimeout(
       () =>

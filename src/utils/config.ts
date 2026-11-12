@@ -54,6 +54,16 @@ const ConfigSchema = z.object({
   // of its own. Parses run in worker threads, so this is also how many CPU
   // cores large documents may occupy at once.
   ELO_CONTENT_CONCURRENCY: z.coerce.number().int().positive().max(8).default(2),
+  // Extracted text is kept this long after its last read, in seconds, so the
+  // next page of the same version is a slice instead of another download and
+  // parse (26 s for the BKI catalogue). 0 turns the cache off. The text lives
+  // in this process's memory for that time, like the session credentials do.
+  ELO_CONTENT_CACHE_TTL: z.coerce.number().int().min(0).max(86_400).default(600),
+  // Budget across all cached documents, in characters. A character costs one
+  // or two bytes; a single "€" makes the whole text two-byte. The BKI catalogue
+  // is 1.6 million characters, so the default holds about a dozen of those in
+  // at most 40 MB.
+  ELO_CONTENT_CACHE_MAX_CHARS: z.coerce.number().int().positive().default(20_000_000),
   // NOTE: not z.coerce.boolean() — that turns the string "false" into true.
   ELO_DOCUMENT_CONTENT_ENABLED: z
     .enum(['true', 'false'])

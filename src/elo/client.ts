@@ -27,6 +27,8 @@ export interface DownloadedFile {
 export interface DownloadOptions {
   maxBytes: number;
   timeoutMs: number;
+  /** Aborts the transfer; the promise then rejects with the signal's reason. */
+  signal?: AbortSignal;
 }
 
 export interface UploadOptions {
@@ -263,6 +265,7 @@ export class EloClient {
       const response = await this.http.get<ArrayBuffer>(url, {
         responseType: 'arraybuffer',
         timeout: opts.timeoutMs,
+        signal: opts.signal,
         maxContentLength: opts.maxBytes,
         maxBodyLength: opts.maxBytes,
         // Axios has historically forwarded `Authorization` across cross-host
@@ -292,6 +295,9 @@ export class EloClient {
         fileName: parseFileName(headers['content-disposition']),
       };
     } catch (err) {
+      // An abort is the caller's decision, not a download failure: hand back
+      // the caller's own reason rather than axios's CanceledError.
+      if (opts.signal?.aborted) throw opts.signal.reason;
       throw this.mapDownloadError(err, url);
     }
   }

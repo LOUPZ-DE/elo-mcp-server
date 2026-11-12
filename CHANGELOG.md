@@ -14,8 +14,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   extraction now runs in its own worker thread — measured locally, the longest
   stall for another client fell from 1.3 s to 0.03 s on a 750-page PDF. A
   worker costs about 30 ms. See `BUGFIXES.md` #31.
+- **A call whose client has gone away now stops.** It leaves the queue for a
+  content slot, its download from ELO is closed, its worker is terminated.
+  Before, an abandoned read of the catalogue ran its full 26 s, and every call
+  queued behind it waited for a result nobody would receive. The SDK aborts
+  `extra.signal` when the connection closes or `notifications/cancelled`
+  arrives; the signal now reaches the download and the parser. Checked end to
+  end against a stub IX: the client hangs up, the server closes its stream.
+- **Renewing an expired content URL fetched the wrong version.** The retry
+  looked the version up by `version`, which is empty for every version on this
+  instance (`BUGFIXES.md` #29), so it always found the working version — an
+  older version requested came back with the newest text. Now matched by id,
+  with no fallback to another version.
+- **The content slot could be handed to two callers at once.** Releasing freed
+  the slot before the next waiter resumed, so a newcomer in between could take
+  it as well. The slot now passes straight to the next waiter.
 
 ### Added
+- **A cache for extracted text** (`ELO_CONTENT_CACHE_TTL`, 600 s after the last
+  read; `ELO_CONTENT_CACHE_MAX_CHARS`, 20 million). Paging through the
+  catalogue cost a full download and parse — 26 s — per 50 000 characters; now
+  the first call pays and the next pages are slices of memory. Parallel calls
+  for the same version — Notion was seen sending two calls at once — share one
+  parse, which is cancelled only when the last of them gives up.
+
+  Keyed by version id, so a new checkin is a new key. Every call still checks
+  the document out on the caller's own session before the cache is asked, so
+  it never serves text to someone ELO would refuse. Only download and parse
+  take a content slot, so a cached page no longer queues behind someone else's
+  60 MB PDF.
 - **`ELO_EXTRACT_TIMEOUT_MS`** (default 60 s): how long a parse may run before
   its worker is stopped. Possible only now — an in-process parse could be
   abandoned but not interrupted. Deliberately no heap limit: measured, a worker

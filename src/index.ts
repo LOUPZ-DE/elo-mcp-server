@@ -21,8 +21,10 @@ import { eloListFolder, ListFolderInputSchema } from './tools/elo_list_folder.js
 import {
   eloGetDocumentContent,
   GetDocumentContentInputSchema,
+  type DocumentText,
 } from './tools/elo_get_document_content.js';
 import { createSemaphore } from './utils/semaphore.js';
+import { ReadCache } from './utils/readCache.js';
 import { setConfig } from './utils/runtimeConfig.js';
 import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js';
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
@@ -176,12 +178,28 @@ const projectFolderOptions = {
   projectMarkerValue: cfg.ELO_PROJECT_MARKER_VALUE,
 };
 
+/** Serialises document downloads so parallel large files cannot exhaust memory. */
+const withContentSlot = createSemaphore(cfg.ELO_CONTENT_CONCURRENCY);
+
+// One cache for the process, shared by every per-request server. Keyed by
+// version; each call still checks out on the caller's own session first.
+const contentCache =
+  cfg.ELO_CONTENT_CACHE_TTL > 0
+    ? new ReadCache<DocumentText>({
+        ttlMs: cfg.ELO_CONTENT_CACHE_TTL * 1000,
+        maxSize: cfg.ELO_CONTENT_CACHE_MAX_CHARS,
+        sizeOf: (t) => t.extracted.text.length,
+      })
+    : undefined;
+
 const contentOptions = {
   webclientBaseUrl: cfg.ELO_WEBCLIENT_URL,
   maxBytes: cfg.ELO_MAX_DOCUMENT_BYTES,
   maxChars: cfg.ELO_MAX_TEXT_CHARS,
   timeoutMs: cfg.ELO_DOWNLOAD_TIMEOUT_MS,
   extractTimeoutMs: cfg.ELO_EXTRACT_TIMEOUT_MS,
+  slot: withContentSlot,
+  cache: contentCache,
 };
 
 // Allowlists for the write MVP. Empty lists permit nothing; loadConfig()
@@ -193,9 +211,6 @@ const writePolicy: WritePolicy = {
   mimeTypes: parseMimeTypes(cfg.ELO_WRITE_MIME_TYPES),
   maxBytes: cfg.ELO_WRITE_MAX_BYTES,
 };
-
-/** Serialises document downloads so parallel large files cannot exhaust memory. */
-const withContentSlot = createSemaphore(cfg.ELO_CONTENT_CONCURRENCY);
 
 // Surfaced on every search/listing hit. Without these the model cannot tell
 // two similarly named documents from different projects apart.
@@ -428,18 +443,19 @@ function createServer(log: Logger = logger): McpServer {
       },
       async (args, extra) => {
         try {
-          // Time spent queueing for a slot is logged beside the read itself:
-          // with ELO_CONTENT_CONCURRENCY=1 a second parallel call can take
-          // twice as long while doing exactly the same work.
-          const queuedAt = performance.now();
-          const result = await withContentSlot(() => {
-            const slotWaitMs = Math.round(performance.now() - queuedAt);
-            return withEloClient(extra.authInfo, (c) =>
-              eloGetDocumentContent(c, args, { ...contentOptions, log: log.child({ slotWaitMs }) }),
-            );
-          });
+          // extra.signal is aborted by the SDK when the connection closes or
+          // the client sends notifications/cancelled. The slot is taken inside
+          // the tool, around download and parse only.
+          const result = await withEloClient(extra.authInfo, (c) =>
+            eloGetDocumentContent(c, args, { ...contentOptions, log, signal: extra.signal }),
+          );
           return respond(result, nextStepsForDocumentContent(result));
         } catch (err) {
+          // Nobody is left to read an answer. The tool has logged the phase it
+          // stopped in; an error-level line here would only be noise.
+          if (extra.signal.aborted) {
+            return { isError: true, content: [{ type: 'text' as const, text: 'Error: the request was cancelled.' }] };
+          }
           return asError(err);
         }
       },

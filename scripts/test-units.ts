@@ -52,8 +52,11 @@ import {
   resolveVersion,
   DocumentContentError,
   eloGetDocumentContent,
+  type DocumentText,
 } from '../src/tools/elo_get_document_content.js';
-import type { EloClient } from '../src/elo/client.js';
+import { EloStaleStreamError, type EloClient } from '../src/elo/client.js';
+import { createSemaphore } from '../src/utils/semaphore.js';
+import { ReadCache } from '../src/utils/readCache.js';
 import pino, { type Logger } from 'pino';
 import { hashPayload, prepareWrite, consumeWrite, resetPreflight } from '../src/write/preflight.js';
 import {
@@ -1670,6 +1673,252 @@ test('a parse that runs past its time limit is stopped, not waited for', async (
   );
   // An in-process parse could only be abandoned, and would have run on.
   assert.ok(performance.now() - started < 1000);
+});
+
+test('a parse whose client gave up is stopped as well', async () => {
+  const quit = new AbortController();
+  const started = performance.now();
+  const parsing = extractTextIsolated({ data: tablePdf(400), ext: 'pdf' }, 60_000, quit.signal);
+  setTimeout(() => quit.abort(), 50);
+  await assert.rejects(parsing, (err: unknown) => (err as Error).name === 'AbortError');
+  assert.ok(performance.now() - started < 1000);
+});
+
+section('Content slots');
+
+const isAbort = (err: unknown): boolean => (err as Error).name === 'AbortError';
+
+test('never more holders than the limit', async () => {
+  const slot = createSemaphore(2);
+  let active = 0;
+  let peak = 0;
+  const job = (delay: number) =>
+    new Promise<void>((resolve) => setTimeout(resolve, delay)).then(() =>
+      slot(async () => {
+        active++;
+        peak = Math.max(peak, active);
+        await new Promise((r) => setTimeout(r, 3));
+        active--;
+      }),
+    );
+  await Promise.all(Array.from({ length: 30 }, (_, i) => job(i % 4)));
+  assert.equal(peak, 2);
+});
+
+test('a caller that gives up leaves the queue and never runs', async () => {
+  const slot = createSemaphore(1);
+  let free!: () => void;
+  const holder = slot(() => new Promise<void>((r) => (free = r)));
+  const quit = new AbortController();
+  let ran = false;
+  const quitter = slot(async () => {
+    ran = true;
+  }, quit.signal);
+  const next = slot(async () => 'next in line');
+
+  quit.abort();
+  await assert.rejects(quitter, isAbort);
+  free();
+  await holder;
+  // Before, the abandoned read still ran when its turn came, and the one
+  // behind it waited the whole time for nothing.
+  assert.equal(await next, 'next in line');
+  assert.equal(ran, false);
+});
+
+section('Read cache');
+
+test('a read is kept for a while after its last use, then reloaded', async () => {
+  let now = 0;
+  const cache = new ReadCache<string>({ ttlMs: 1000, maxSize: 100, sizeOf: (s) => s.length, now: () => now });
+  let loads = 0;
+  const load = async () => {
+    loads++;
+    return 'text';
+  };
+  assert.equal((await cache.fetch('a', load)).source, 'miss');
+  now = 900;
+  assert.equal((await cache.fetch('a', load)).source, 'hit');
+  // Renewed at 900, so still there at 1 800 — someone paging through a
+  // document keeps it alive.
+  now = 1800;
+  assert.equal((await cache.fetch('a', load)).source, 'hit');
+  now = 2801;
+  assert.equal((await cache.fetch('a', load)).source, 'miss');
+  assert.equal(loads, 2);
+});
+
+test('over budget, the least recently read entry goes first', async () => {
+  const cache = new ReadCache<string>({ ttlMs: 60_000, maxSize: 10, sizeOf: (s) => s.length });
+  await cache.fetch('a', async () => 'aaaa');
+  await cache.fetch('b', async () => 'bbbb');
+  await cache.fetch('a', async () => 'unused'); // read again: now the most recent
+  await cache.fetch('c', async () => 'cccc'); // 12 > 10: b goes, not a
+  assert.equal((await cache.fetch('a', async () => 'unused')).source, 'hit');
+  assert.equal((await cache.fetch('b', async () => 'bbbb')).source, 'miss');
+});
+
+test('an entry larger than the whole budget is not kept', async () => {
+  const cache = new ReadCache<string>({ ttlMs: 60_000, maxSize: 10, sizeOf: (s) => s.length });
+  await cache.fetch('big', async () => 'x'.repeat(11));
+  assert.equal((await cache.fetch('big', async () => 'x')).source, 'miss');
+});
+
+test('parallel calls for the same key share one load', async () => {
+  // Notion sends several pages of one document at once; each used to pay for
+  // its own download and parse.
+  const cache = new ReadCache<string>({ ttlMs: 60_000, maxSize: 100, sizeOf: (s) => s.length });
+  let loads = 0;
+  let finish!: (v: string) => void;
+  const load = () => {
+    loads++;
+    return new Promise<string>((r) => (finish = r));
+  };
+  const one = cache.fetch('k', load);
+  const two = cache.fetch('k', load);
+  finish('text');
+  const [a, b] = await Promise.all([one, two]);
+  assert.equal(loads, 1);
+  assert.equal(a.source, 'miss');
+  assert.deepEqual(b, { value: 'text', source: 'joined' });
+});
+
+test('one caller giving up does not take the result away from another', async () => {
+  const cache = new ReadCache<string>({ ttlMs: 60_000, maxSize: 100, sizeOf: (s) => s.length });
+  let loadSignal!: AbortSignal;
+  let finish!: (v: string) => void;
+  const load = (signal: AbortSignal) => {
+    loadSignal = signal;
+    return new Promise<string>((r) => (finish = r));
+  };
+  const impatient = new AbortController();
+  const one = cache.fetch('k', load, impatient.signal);
+  const two = cache.fetch('k', load, new AbortController().signal);
+  impatient.abort();
+  await assert.rejects(one, isAbort);
+  assert.equal(loadSignal.aborted, false);
+  finish('text');
+  assert.equal((await two).value, 'text');
+});
+
+test('the load stops when the last caller gives up, and the next caller starts afresh', async () => {
+  const cache = new ReadCache<string>({ ttlMs: 60_000, maxSize: 100, sizeOf: (s) => s.length });
+  let loadSignal!: AbortSignal;
+  const hang = (signal: AbortSignal) => {
+    loadSignal = signal;
+    return new Promise<string>(() => {});
+  };
+  const a = new AbortController();
+  const b = new AbortController();
+  const one = cache.fetch('k', hang, a.signal);
+  const two = cache.fetch('k', hang, b.signal);
+  a.abort();
+  b.abort();
+  await assert.rejects(one, isAbort);
+  await assert.rejects(two, isAbort);
+  assert.equal(loadSignal.aborted, true);
+  // The abandoned load has not settled yet; joining it would hand this caller
+  // an abort it never asked for.
+  assert.deepEqual(await cache.fetch('k', async () => 'fresh'), { value: 'fresh', source: 'miss' });
+});
+
+section('Document content — cache and cancellation');
+
+const textCache = () =>
+  new ReadCache<DocumentText>({ ttlMs: 60_000, maxSize: 1_000_000, sizeOf: (t) => t.extracted.text.length });
+
+test('the next page comes from the cache, after a fresh checkout', async () => {
+  let checkouts = 0;
+  let downloads = 0;
+  const client = {
+    request: async () => {
+      checkouts++;
+      return checkoutOf({ url: 'https://elo.example.com/ix/stream/385200' });
+    },
+    download: async () => {
+      downloads++;
+      return { data: Buffer.from('Seite eins. Seite zwei.') };
+    },
+  } as unknown as EloClient;
+  const { log, lines } = capturingLog();
+  const options = { ...readOptions, cache: textCache(), log };
+
+  await eloGetDocumentContent(client, { objId: '548900' }, options);
+  const page = await eloGetDocumentContent(client, { objId: '548900', offset: 12 }, options);
+
+  assert.equal(page.text, 'Seite zwei.');
+  assert.equal(downloads, 1);
+  // The checkout is the caller's own session proving read access; a cache
+  // that skipped it would serve text to anyone who knows an objId.
+  assert.equal(checkouts, 2);
+  assert.deepEqual(
+    lines.map((l) => l.cache),
+    ['miss', 'hit'],
+  );
+});
+
+test('a cache hit does not queue behind a parse in progress', async () => {
+  const client = {
+    request: async () => checkoutOf({ url: 'https://elo.example.com/ix/stream/385200' }),
+    download: async () => ({ data: Buffer.from('Kostenkennwerte') }),
+  } as unknown as EloClient;
+  const slot = createSemaphore(1);
+  const options = { ...readOptions, cache: textCache(), slot, log: capturingLog().log };
+  await eloGetDocumentContent(client, { objId: '548900' }, options);
+
+  let free!: () => void;
+  const catalogue = slot(() => new Promise<void>((r) => (free = r))); // someone's 60 MB PDF
+  const page = await eloGetDocumentContent(client, { objId: '548900' }, options);
+  assert.equal(page.text, 'Kostenkennwerte');
+  free();
+  await catalogue;
+});
+
+test('a stale content URL for an older version is renewed for that version, not the newest', async () => {
+  // `version` is empty for every version here, so matching on it picked the
+  // working version — and the cache would then have kept that text under the
+  // older version's key.
+  const versionsWith = (prefix: string) => ({
+    result: {
+      sord: { id: '548900', name: SECRET_NAME, type: 254 },
+      document: {
+        docs: [
+          { id: 385201, version: '', contentType: 'text/plain', ext: 'txt', url: `${prefix}/new` },
+          { id: 385200, version: '', contentType: 'text/plain', ext: 'txt', url: `${prefix}/old` },
+        ],
+      },
+    },
+  });
+  let checkouts = 0;
+  const fetched: string[] = [];
+  const client = {
+    request: async () => versionsWith(checkouts++ === 0 ? 'https://a' : 'https://b'),
+    download: async (url: string) => {
+      fetched.push(url);
+      if (url.startsWith('https://a')) throw new EloStaleStreamError('expired');
+      return { data: Buffer.from(url.endsWith('/old') ? 'alte Fassung' : 'neue Fassung') };
+    },
+  } as unknown as EloClient;
+
+  const read = await eloGetDocumentContent(client, { objId: '548900', version: '385200' }, readOptions);
+  assert.deepEqual(fetched, ['https://a/old', 'https://b/old']);
+  assert.equal(read.text, 'alte Fassung');
+});
+
+test('a client that gives up stops the download, and the log says so', async () => {
+  const quit = new AbortController();
+  const client = {
+    request: async () => checkoutOf({ url: 'https://elo.example.com/ix/stream/385200' }),
+    download: (_url: string, opts: { signal?: AbortSignal }) =>
+      new Promise((_resolve, reject) => opts.signal!.addEventListener('abort', () => reject(opts.signal!.reason))),
+  } as unknown as EloClient;
+  const { log, lines } = capturingLog();
+
+  const reading = eloGetDocumentContent(client, { objId: '548900' }, { ...readOptions, log, signal: quit.signal });
+  setTimeout(() => quit.abort(), 10);
+  await assert.rejects(reading, isAbort);
+  assert.equal(lines[0]!.failedIn, 'download');
+  assert.equal(lines[0]!.abandoned, true);
 });
 
 section('Write — the identity gate');
